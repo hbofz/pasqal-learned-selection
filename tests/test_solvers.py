@@ -47,3 +47,11 @@ def test_solvers_accept_string_labels():
     assert len(exact_mis(G)[0]) == 4
     assert all(is_maximal(G, S) for S in top_maximal_sets(G, 3))
     assert is_maximal(G, min_degree_greedy(G, 0))
+
+def test_top_maximal_sets_is_deterministic_on_gls_pieces():
+    from learned_selection.engine import gls_generator
+    for seed in range(4):
+        G = erdos_renyi(60, 0.25, seed)
+        for m in gls_generator()(G, 4):
+            P = G.subgraph(m)
+            assert len({tuple(top_maximal_sets(P, 2)) for _ in range(20)}) == 1
