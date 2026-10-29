@@ -29,10 +29,37 @@ def test_counts_small_pieces():
     assert r.quantum_runs > r.pasqal_runs and r.rounds >= 1
 
 def test_own_rng_survives_vendored_reseeding():
+    import random
+    from learned_selection.engine import paper_generator
     G = erdos_renyi(50, 0.2, 2)
-    before = min_degree_greedy(G, 7)
-    gls_generator()(G, 4)
-    assert min_degree_greedy(G, 7) == before
+    random.seed(123); before, maps = min_degree_greedy(G, 7), paper_generator(seed=4)(G, 4)
+    gls_generator()(G, 4); random.seed(999)
+    assert min_degree_greedy(G, 7) == before and paper_generator(seed=4)(G, 4) == maps
+
+def test_code_prune_running_counter():
+    p = code_prune(2, 10)
+    lv = [(None, [0] * i) for i in range(6)]
+    assert p(lv, 6) == lv                                   # counter 6: no prune
+    assert [len(b[1]) for b in p(lv, 6)] == [5, 4]         # counter 12 > 10: keep k=2 best, reset
+    assert p(lv, 6) == lv                                   # counter back to 6
+
+def test_only_solver_children_count_toward_pruning():
+    seen, returned = [], []
+    inner = code_prune(4, 10)
+    spy_prune = lambda level, children: (seen.append(children), inner(level, children))[1]
+    def spy_solve(piece, m, s):
+        out = exact_piece_solver(piece, m, s)
+        returned.append(len(out))
+        return out
+    r = run_beam(erdos_renyi(40, 0.75, 0), gls_generator(), spy_solve, 4, 2, spy_prune)
+    assert r.quantum_runs > r.pasqal_runs          # small pieces did occur
+    assert sum(seen) == sum(returned)              # yet only solver children were counted
+
+def test_generators_require_trap_ids_in_order():
+    c = load_coords()
+    shuffled = {t: c[t] for t in reversed(list(c))}
+    with pytest.raises(ValueError):
+        gls_generator(coords=shuffled)
 
 def test_engine_on_string_labels():
     G = erdos_renyi(30, 0.25, 0)

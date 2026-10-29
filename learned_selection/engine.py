@@ -32,9 +32,16 @@ class RunResult:
     solver_s: float
 
 
+def _check_trap_order(coords: dict) -> None:
+    # GreedyMapping relabels the lattice to positional indices; those equal trap ids only for keys 0..n-1 in order
+    if list(coords) != list(range(len(coords))):
+        raise ValueError("lattice trap ids must be 0..n-1 in insertion order")
+
+
 def gls_generator(coords=None, blockade=BLOCKADE_UM, seed=0) -> Generator:
     """Vendored obtain_embeddable_subgraphs: grow a piece from every vertex, keep the k largest."""
     coords = load_coords() if coords is None else coords
+    _check_trap_order(coords)
     lattice = Lattice(coords, blockade, seed=seed)
 
     def generate(g: nx.Graph, k: int) -> list[Mapping]:
@@ -81,7 +88,7 @@ def _remove_closed(g: nx.Graph, S) -> nx.Graph:
 
 
 def run_beam(graph: nx.Graph, generate: Generator, solve: PieceSolver, k: int, s: int, prune: Pruner,
-             small: int = 5, max_branches: int = 10_000, lattice: nx.Graph | None = None) -> RunResult:
+             small: int = 5, max_branches: int = 1_000, lattice: nx.Graph | None = None) -> RunResult:
     start = time.perf_counter()
     L = lattice_graph(load_coords()) if lattice is None else lattice
     if list(graph) == list(range(len(graph))):
@@ -155,6 +162,7 @@ def paper_generator(coords=None, blockade=BLOCKADE_UM, seed=0) -> Generator:
     """The paper's loop: k pieces grown from k random starting items, each placed at the lattice centre.
     The ranking score stays the vendored one, since the paper does not pin its sort direction."""
     coords = load_coords() if coords is None else coords
+    _check_trap_order(coords)
     lattice = Lattice(coords, blockade)
     rng = random.Random(seed)
 
