@@ -3,13 +3,13 @@
 Code-faithful mode mirrors vendored greedy_subgraph_solver_vv.solve_breadthfirst call for call,
 including the order of calls into the global `random` state that the vendored code reseeds.
 """
-import copy, time
+import copy, random, time
 from dataclasses import dataclass
 from typing import Callable
 
 import networkx as nx
 
-from .lattice import BLOCKADE_UM, load_coords, lattice_graph, is_valid_piece
+from .lattice import BLOCKADE_UM, CENTER_TRAP, load_coords, lattice_graph, is_valid_piece
 from .solvers import first_maximum_set, is_independent, top_maximal_sets
 from .vendored import GreedyMapping, Lattice, greedy_subgraph_solver_vv, weighted_generate_different_mis
 
@@ -139,3 +139,46 @@ def run_beam(graph: nx.Graph, generate: Generator, solve: PieceSolver, k: int, s
 def run_code_faithful(graph: nx.Graph, k: int, s: int, l: int, solve: PieceSolver = exact_piece_solver,
                       seed: int = 0, small: int = 5) -> RunResult:
     return run_beam(graph, gls_generator(seed=seed), solve, k, s, code_prune(k, l), small)
+
+
+class CenterSeededMapping(GreedyMapping):
+    """GLS growth as the paper describes it: the starting item goes on the central trap."""
+
+    def initialize_mapping(self, starting_node, mapping, unmapping, unexpanded_nodes) -> int:
+        mapping[starting_node] = CENTER_TRAP
+        unmapping[CENTER_TRAP] = starting_node
+        unexpanded_nodes.add(starting_node)
+        return CENTER_TRAP
+
+
+def paper_generator(coords=None, blockade=BLOCKADE_UM, seed=0) -> Generator:
+    """The paper's loop: k pieces grown from k random starting items, each placed at the lattice centre.
+    The ranking score stays the vendored one, since the paper does not pin its sort direction."""
+    coords = load_coords() if coords is None else coords
+    lattice = Lattice(coords, blockade)
+    rng = random.Random(seed)
+
+    def generate(g: nx.Graph, k: int) -> list[Mapping]:
+        starts = rng.sample(sorted(g, key=repr), min(k, len(g)))
+        return [CenterSeededMapping(g, copy.deepcopy(lattice), [], seed=rng.randrange(2**31))
+                .generate_greedy_ud_subgraph_with(v) for v in starts]
+    return generate
+
+
+def paper_prune(l: int) -> Pruner:
+    """The paper's beam: always keep the l best partial solutions."""
+    return lambda level, children: sorted(level, key=lambda b: len(b[1]), reverse=True)[:l]
+
+
+def run_paper_faithful(graph: nx.Graph, k: int, s: int, l: int, solve: PieceSolver = exact_piece_solver,
+                       seed: int = 0, small: int = 5) -> RunResult:
+    return run_beam(graph, paper_generator(seed=seed), solve, k, s, paper_prune(l), small)
+
+
+def best_of_restarts(run: Callable[[int], RunResult], restarts: int) -> RunResult:
+    """Best answer over runs with seeds 0..restarts-1 (ties go to the earlier seed); costs are summed."""
+    rs = [run(seed) for seed in range(restarts)]
+    best = max(rs, key=lambda r: r.size)
+    total = lambda f: sum(getattr(r, f) for r in rs)
+    return RunResult(best.solution, best.size, total("quantum_runs"), total("pasqal_runs"), total("atoms"),
+                     total("rounds"), total("classical_s"), total("solver_s"))
