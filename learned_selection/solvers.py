@@ -5,12 +5,26 @@ import networkx as nx
 from ortools.sat.python import cp_model
 
 
+def canonical(graph: nx.Graph) -> nx.Graph:
+    """Copy with nodes and edges in repr-sorted order. Views of str-labelled graphs iterate Python sets, whose
+    order changes with the per-process hash seed; anything order-dependent runs on this copy instead."""
+    H = nx.Graph()
+    H.add_nodes_from(sorted(graph.nodes(data=True), key=lambda nd: repr(nd[0])))
+    H.add_edges_from(sorted((tuple(sorted(e, key=repr)) for e in graph.edges()), key=lambda e: (repr(e[0]), repr(e[1]))))
+    return H
+
+
+def _deterministic(graph: nx.Graph) -> nx.Graph:
+    return graph if all(type(v) is int for v in graph) else canonical(graph)
+
+
 def is_independent(graph: nx.Graph, nodes) -> bool:
     S = set(nodes)
     return not any(u in S for v in S for u in graph[v])
 
 
 def _mis_model(graph: nx.Graph, maximal: bool):
+    graph = _deterministic(graph)
     nodes = list(graph)
     idx = {v: i for i, v in enumerate(nodes)}
     m = cp_model.CpModel()
@@ -60,6 +74,7 @@ def top_maximal_sets(graph: nx.Graph, s: int) -> list[frozenset]:
 
 def first_maximum_set(graph: nx.Graph) -> list:
     """Pasqal's small-piece rule: the first maximum independent set in include-first DFS order over graph.nodes()."""
+    graph = _deterministic(graph)
     nodes = list(graph.nodes())
     best: list = []
 

@@ -63,10 +63,10 @@ def test_generators_require_trap_ids_in_order():
 
 def test_engine_on_string_labels():
     G = erdos_renyi(30, 0.25, 0)
-    S = nx.relabel_nodes(G, lambda i: f"S{i}")
+    S = nx.relabel_nodes(G, lambda i: f"S{i:02d}")   # zero-padded: repr order equals int order
     r_int, r_str = run_code_faithful(G, 4, 2, 10), run_code_faithful(S, 4, 2, 10)
     assert is_independent(S, r_str.solution)
-    assert r_str.solution == frozenset(f"S{i}" for i in r_int.solution)
+    assert r_str.solution == frozenset(f"S{i:02d}" for i in r_int.solution)
 
 @pytest.mark.parametrize("G", [nx.empty_graph(0), nx.empty_graph(7), nx.path_graph(4),
                                nx.disjoint_union_all([nx.path_graph(3), nx.path_graph(4), nx.empty_graph(3)])])
@@ -85,3 +85,54 @@ def test_engine_accepts_short_solver_output():
     one = lambda piece, m, s: exact_piece_solver(piece, m, 1)
     r = run_code_faithful(erdos_renyi(40, 0.25, 1), 4, 3, 10, solve=one)
     assert is_independent(erdos_renyi(40, 0.25, 1), r.solution)
+
+GAP_CASES = list(itertools.product([30, 40], range(6), ["drop0", "drop3711", "shift100"]))
+
+@pytest.mark.parametrize("n,seed,variant", GAP_CASES)
+def test_matches_vendored_on_gapped_and_shifted_int_labels(n, seed, variant):
+    G = erdos_renyi(n, 0.25, seed)
+    if variant == "drop0":
+        G.remove_node(0)
+    elif variant == "drop3711":
+        G.remove_nodes_from([3, 7, 11])
+    else:
+        G = nx.relabel_nodes(G, lambda v: v + 100)
+    with contextlib.redirect_stdout(io.StringIO()):
+        best, _, nodes = greedy_subgraph_solver_vv(G, load_coords(), 6.6, weighted_generate_different_mis).solve(
+            "breadthfirst", exact_solving_threshold=5, subgraph_quantity=4, mis_sample_quantity=2, exploration_threshold=10)
+    r = run_code_faithful(G, 4, 2, 10, solve=pasqal_greedy_piece_solver())
+    assert r.solution == frozenset(best) and r.pasqal_runs == len(nodes)
+
+HASH_SCRIPT = """
+import networkx as nx
+from learned_selection.engine import run_code_faithful
+from learned_selection.instances import erdos_renyi
+from learned_selection.solvers import top_maximal_sets
+S = nx.relabel_nodes(erdos_renyi(120, 0.25, 0), lambda i: f"T{i:03d}")
+view = S.subgraph([f"T{i:03d}" for i in range(0, 120, 2)])     # < half the nodes: iterates a set of str
+r = run_code_faithful(view, 4, 2, 10)
+print(sorted(r.solution), r.pasqal_runs, r.quantum_runs)
+print([sorted(x) for x in top_maximal_sets(S.subgraph([f"T{i:03d}" for i in range(0, 50, 2)]), 3)])
+"""
+
+def test_string_label_views_reproduce_across_processes():
+    import os, subprocess, sys
+    outs = {subprocess.run([sys.executable, "-W", "ignore", "-c", HASH_SCRIPT], capture_output=True, text=True,
+                           env={**os.environ, "PYTHONHASHSEED": h}, check=True).stdout for h in ("1", "2", "3")}
+    assert len(outs) == 1, outs
+
+def _bad_solver(kind):
+    def solve(piece, m, s):
+        good = exact_piece_solver(piece, m, s)
+        return {"none": [], "empty": [frozenset()], "outside": [good[0] | {"stranger"}],
+                "dependent": [frozenset(list(piece.edges())[0])]}[kind]
+    return solve
+
+@pytest.mark.parametrize("kind", ["none", "empty", "outside", "dependent"])
+def test_engine_rejects_bad_solver_output(kind):
+    with pytest.raises(ValueError):
+        run_code_faithful(erdos_renyi(40, 0.25, 0), 4, 2, 10, solve=_bad_solver(kind))
+
+def test_engine_rejects_empty_generator_output():
+    with pytest.raises(ValueError):
+        run_beam(erdos_renyi(40, 0.25, 0), lambda g, k: [{}], exact_piece_solver, 4, 2, code_prune(4, 10))

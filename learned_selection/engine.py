@@ -10,7 +10,7 @@ from typing import Callable
 import networkx as nx
 
 from .lattice import BLOCKADE_UM, CENTER_TRAP, load_coords, lattice_graph, is_valid_piece
-from .solvers import first_maximum_set, is_independent, top_maximal_sets
+from .solvers import canonical, first_maximum_set, is_independent, top_maximal_sets
 from .vendored import GreedyMapping, Lattice, greedy_subgraph_solver_vv, weighted_generate_different_mis
 
 Mapping = dict                                                   # graph node -> trap id
@@ -91,11 +91,11 @@ def run_beam(graph: nx.Graph, generate: Generator, solve: PieceSolver, k: int, s
              small: int = 5, max_branches: int = 1_000, lattice: nx.Graph | None = None) -> RunResult:
     start = time.perf_counter()
     L = lattice_graph(load_coords()) if lattice is None else lattice
-    if list(graph) == list(range(len(graph))):
-        g0, back = graph, None   # keep the original adjacency order: the exact-match test depends on it
+    if all(type(v) is int for v in graph):
+        g0, back = graph, None   # as-is, like the vendored code: int hashing is deterministic, adjacency order kept
     else:
-        # GLS iterates Python sets; string hashing is randomised per process, so run on integer labels
-        g0 = nx.convert_node_labels_to_integers(graph, label_attribute="orig")
+        # GLS iterates Python sets and str hashing is randomised per process: run on a canonical integer copy
+        g0 = nx.convert_node_labels_to_integers(canonical(graph), label_attribute="orig")
         back = nx.get_node_attributes(g0, "orig")
 
     queue: list[Branch] = [(g0, [])]
@@ -114,6 +114,8 @@ def run_beam(graph: nx.Graph, generate: Generator, solve: PieceSolver, k: int, s
                     best = total
                 continue
             for m in generate(g, k):   # all mappings first, then solve: same RNG order as vendored
+                if not m:
+                    raise ValueError("generator returned an empty piece")   # would never shrink the branch
                 if not is_valid_piece(g, m, L):
                     raise AssertionError(f"generator produced a piece that does not fit the lattice: {m}")  # R1
                 piece = g.subgraph(m)
@@ -127,7 +129,11 @@ def run_beam(graph: nx.Graph, generate: Generator, solve: PieceSolver, k: int, s
                 t = time.perf_counter()
                 sets = solve(piece, m, s)
                 solver_s += time.perf_counter() - t
+                if not sets:
+                    raise ValueError("piece solver returned no sets for a non-empty piece")
                 for S in sets:
+                    if not S or not set(S) <= m.keys() or not is_independent(piece, S):
+                        raise ValueError(f"piece solver returned an invalid set: {sorted(S, key=repr)}")
                     next_level.append((_remove_closed(g, S), sol + list(S)))
                     children += 1
         queue = prune(next_level, children)
