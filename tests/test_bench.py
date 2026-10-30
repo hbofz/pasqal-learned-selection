@@ -1,5 +1,5 @@
 import json, numpy as np, pytest
-from learned_selection.bench import BEAM_METHODS, gap_pct, run_instance
+from learned_selection.bench import BEAM_METHODS, gap_pct, run_instance, main as bench_main
 from learned_selection.curves import bootstrap_ci, curve_gain, load, paired
 from learned_selection.features import PIECE_FEATURES, VERTEX_FEATURES
 from learned_selection.models import fit_lgbm, fit_linear, save
@@ -59,3 +59,15 @@ def test_every_beam_method_runs_with_trained_models(tmp_path):
     recs = run_instance("er", {"p": 0.25}, 25, 0, BEAM_METHODS, widths=[(2, 2, 5)], restarts=[1],
                         time_limit_s=10, models_dir=tmp_path)
     assert {r["method"] for r in recs} == set(BEAM_METHODS) and all(r["size"] for r in recs)
+
+def test_resume_skips_a_cut_off_last_line(tmp_path, capsys):
+    out = tmp_path / "run.jsonl"
+    args = ["--family", "er", "--params", "p=0.25", "--n", "20", "--methods", "greedy-mindeg", "--out", str(out)]
+    bench_main(["--seeds", "0-0", *args])
+    out.write_text(out.read_text() + '{"family": "er", "par')       # a run killed mid-write
+    bench_main(["--seeds", "0-1", *args])
+    captured = capsys.readouterr()
+    assert f"skipping line 2 of {out}: not valid JSON" in captured.err
+    assert "1 instances to run, 1 already done" in captured.out
+    lines = out.read_text().splitlines()
+    assert len(lines) == 3 and [json.loads(lines[i])["seed"] for i in (0, 2)] == [0, 1]

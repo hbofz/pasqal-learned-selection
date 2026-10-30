@@ -1,6 +1,6 @@
-"""Model 3: GLS's own growth score with three tunable numbers (target degree, reward for placed neighbours,
-reward for raw degree), tuned by CMA-ES against the mean final gap to the optimum. It tests whether GLS's fixed
-rule is simply mistuned.
+"""GLS's own growth score with three tunable numbers (target degree, reward for placed neighbours, reward for raw
+degree), tuned by CMA-ES against the mean final gap to the optimum. It tests whether GLS's fixed rule is simply
+mistuned.
 
     uv run python -m learned_selection.evolve --workers 12 --generations 30 --popsize 8 --out models/cma-h2.json
 """

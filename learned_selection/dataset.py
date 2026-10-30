@@ -85,7 +85,7 @@ def label_state(g: nx.Graph, time_limit_s: float, workers: int) -> tuple[tuple |
 
 
 def label_instance(family: str, params: dict, n: int, seed: int, max_states: int = 12,
-                   time_limit_s: float = 20.0, big: int = 100) -> dict:
+                   time_limit_s: float = 60.0, big: int = 100) -> dict:
     """Label the states of one instance. States of at most `big` nodes are labelled here; larger ones come back
     in `deferred` to be labelled with more time and more workers. `is_first` marks the full input graph."""
     if seed in TEST_SEEDS:
@@ -136,6 +136,7 @@ def main(argv=None) -> None:
     ap.add_argument("--workers", type=int, required=True)
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
+    commit = _commit()                                 # read now, so a git failure cannot cost hours of labels
     seeds = instances.TRAIN_SEEDS if a.split == "train" else instances.VAL_SEEDS
     jobs = [(fam, params, n, seed) for fam, params in instances.TRAIN_SETTINGS for n in instances.TRAIN_SIZES
             for seed in seeds]
@@ -179,13 +180,17 @@ def main(argv=None) -> None:
         counts[hook] = dict(states=len(parts[hook]), rows=len(arrays[f"y{d}"]))
     meta = dict(split=a.split, instances=len(jobs), counts=counts, deferred_states=len(deferred),
                 dropped=[dict(setting=s, n=n, hook=h, first=bool(f), count=c) for (s, n, h, f), c in dropped.items()],
-                label_cpu_s=cpu_s, commit=_commit())
+                label_cpu_s=cpu_s, commit=commit)
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     np.savez(out, meta=json.dumps(meta), **arrays)
 
     print(f"{len(jobs)} instances; " + "; ".join(f"{h}: {c['states']} states, {c['rows']} rows"
                                                   for h, c in counts.items()))
+    for hook in HOOKS:
+        lost = sum(c for (_, _, h, _), c in dropped.items() if h == hook)
+        total = counts[hook]["states"] + lost
+        print(f"{hook}: {counts[hook]['states']} states labelled, {lost} dropped ({lost / total if total else 0:.1%})")
     per_setting = Counter((_setting_name(f, p), n) for f, p, n, _ in jobs)
     print(f"{'setting':32}{'n':>5}{'instances':>11}{'h2 first':>10}{'h4 first':>10}")
     for (name, n), total in per_setting.items():

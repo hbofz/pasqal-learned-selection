@@ -7,7 +7,7 @@
 Records are appended as each instance finishes. A rerun skips every (instance, method) already in --out, so an
 interrupted grid resumes; widths and restarts are not part of that check, so use a new --out to change them.
 """
-import argparse, json, subprocess, time
+import argparse, json, subprocess, sys, time
 from contextlib import nullcontext
 from functools import cache, partial
 from multiprocessing import Pool
@@ -201,10 +201,19 @@ def main(argv=None) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     done = set()
     if out.exists():
-        for line in out.read_text().splitlines():
-            if line.strip():
+        text = out.read_text()
+        for i, line in enumerate(text.splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
                 r = json.loads(line)
-                done.add((*_instance_key(r["family"], r["params"], r["n"], r["seed"]), r["method"]))
+            except json.JSONDecodeError:
+                print(f"skipping line {i} of {out}: not valid JSON", file=sys.stderr)
+                continue
+            done.add((*_instance_key(r["family"], r["params"], r["n"], r["seed"]), r["method"]))
+        if text and not text.endswith("\n"):     # a cut-off last line: start new records on a line of their own
+            with out.open("a") as fh:
+                fh.write("\n")
     jobs = []
     for f, p, n, s in instances:
         missing = [m for m in methods if (*_instance_key(f, p, n, s), m) not in done]
