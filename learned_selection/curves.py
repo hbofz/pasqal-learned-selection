@@ -56,8 +56,16 @@ def bootstrap_ci(values, reps=2000, seed=0) -> tuple[float, float]:
 
 
 def load(paths) -> list[dict]:
-    """Records from JSONL files, with best_known, proven and gap_pct recomputed per instance across all files."""
+    """Records from JSONL files, with best_known, proven and gap_pct recomputed per instance across all files. Two
+    records of one instance and config that differ in size or quantum runs raise ValueError; exact repeats pass."""
     rows = [json.loads(line) for p in paths for line in Path(p).read_text().splitlines() if line.strip()]
+    seen = {}
+    for r in (r for r in rows if r.get("k") is not None):
+        key = (*_cell(r), r["seed"], *_config(r))
+        first = seen.setdefault(key, r)
+        if (first["size"], first["quantum_runs"]) != (r["size"], r["quantum_runs"]):
+            raise ValueError(f"records disagree for {key}: size {first['size']} and {r['size']}, "
+                             f"quantum runs {first['quantum_runs']} and {r['quantum_runs']}")
     best, proven = {}, {}
     for r in rows:
         i = (*_cell(r), r["seed"])

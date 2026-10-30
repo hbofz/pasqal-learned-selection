@@ -164,3 +164,17 @@ def test_cli_sel_split_reads_each_method_at_its_config(tmp_path, capsys):
           "--config", "lin-h4=4,2,100"])
     out = capsys.readouterr().out
     assert "selection" in out and "-1.58 [-1.58, -1.58]" in out and "9.00" not in out
+
+
+def test_load_passes_exact_duplicates_and_names_conflicting_records(tmp_path):
+    from learned_selection.curves import load
+    rows = _rows(FA, PA, 100, TEST_SEEDS[:2], 10 ** 1.5, 6.0)
+    a, b = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    a.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    b.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    assert len(load([a, b])) == 2 * len(rows)
+    for field in ("size", "quantum_runs"):
+        b.write_text("".join(json.dumps(dict(r, **{field: r[field] + 1}) if r["method"] == "lin-h4" else r) + "\n"
+                             for r in rows))
+        with pytest.raises(ValueError, match="lin-h4"):
+            load([a, b])

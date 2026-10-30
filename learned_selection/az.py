@@ -12,7 +12,7 @@ parent of the self-play pool imports no torch, and the workers load it through `
     uv run python -m learned_selection.az loop --method lin-h2+gin-h4+sage-h5+mcts --models models --iters 3 \\
         --budget 100 --k 8 --base-train cache/graphs_train_*.pkl --out models/az --cache cache/az --workers 3
 """
-import argparse, json, os, pickle, random, resource, shutil, subprocess, sys, time
+import argparse, json, os, pickle, random, resource, shutil, subprocess, sys, time, zlib
 from multiprocessing import Pool
 from pathlib import Path
 
@@ -37,7 +37,8 @@ def self_play_job(job: tuple) -> list[dict]:
         raise ValueError(f"seed {seed} is not a training seed; self-play must not use it")
     trace = []
     run_mcts(make(family, n, seed, **params), k, PIECE_SOLVER_WIDTH, budget, c=search_of(method), seed=seed,
-             trace=trace, noise=(*NOISE, np.random.default_rng(seed)), **method_hooks(method, models_dir))
+             trace=trace, noise=(*NOISE, np.random.default_rng(
+                 [seed, n, zlib.crc32(_setting_name(family, params).encode())])), **method_hooks(method, models_dir))
     tag = dict(setting=_setting_name(family, params), instance_n=n, seed=seed)
     return [dict(e, **tag) for e in trace if e["visits"].sum() > 0]
 

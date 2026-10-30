@@ -97,6 +97,16 @@ def test_self_play_returns_tagged_numpy_examples_with_visits(tmp_path):
         assert all(isinstance(v, np.ndarray) for v in (e["edges"], e["expanded"], e["visits"], *e["pieces"]))
 
 
+def test_root_noise_differs_between_settings_at_one_seed_and_repeats_for_one_instance(tmp_path, monkeypatch):
+    import learned_selection.az as az
+    _linear_models(tmp_path)
+    draws = []
+    monkeypatch.setattr(az, "run_mcts", lambda *a, noise, **kw: draws.append(noise[2].random(4).tolist()))
+    for params in ({"p": 0.25}, {"p": 0.1}, {"p": 0.25}):
+        self_play_job(("er", params, 60, 3, "lin-h2h4+lin-h5+mcts", tmp_path, 60, 4))
+    assert draws[0] != draws[1] and draws[0] == draws[2]
+
+
 def test_soft_listwise_loss_agrees_with_listwise_on_uniform_best_targets():
     scores = torch.tensor([3.0, 0.5, 3.0, 1.0, 0.0, 2.0, -1.0], requires_grad=True)
     y = torch.tensor([2.0, 1.0, 2.0, 5.0, 0.0, 0.0, 0.0])
