@@ -250,11 +250,15 @@ def paired(rows, method, baseline="gls", reps=2000, seed=0, seeds=TEST_SEEDS) ->
 
 # Colour follows the model kind, never its position: GLS variants and kinds take fixed slots of a palette whose
 # adjacent pairs stay distinguishable under colour-vision deficiency (checked in this order: gls, lin, lgb, cma,
-# gin, sage, gat, gls-screen). The hook set is the marker, a mix of kinds is dash-dot, and a legend names every line,
-# so colour is never the only code. Orange and red are close, so lin and gin lean on marker and legend.
+# gin, sage, gat, gls-screen, az, against the light surface only, adjacent pairs: worst CVD delta E 9.1, worst
+# normal-vision delta E 20.8). az (#882255) is a ninth, off-palette colour chosen because its worst pair with each
+# of the other eight is delta E 13.8 under CVD and 21.5 in normal vision. Yellow, aqua and magenta sit under 3:1
+# contrast, so those lines lean on the legend. The hook set is the marker, a mix of kinds is dash-dot, and a legend
+# names every line, so colour is never the only code. Orange and red are close, so lin and gin lean on marker and
+# legend.
 COLORS = {"gls": "#2a78d6", "lin": "#eb6834", "lgb": "#1baf7a", "cma": "#eda100", "gin": "#e34948",
           "sage": "#6250d6", "gat": "#008300", "gls-screen": "#e87ba4", "gls-paper": "#a3a29a",
-          "gls-code": "#6e6d68", "exact": "#0b0b0b", "az": "#8a5a2b"}
+          "gls-code": "#6e6d68", "exact": "#0b0b0b", "az": "#882255"}
 COLORS.update({"d" + k: COLORS[k] for k in ("lin", "gin", "sage", "gat")})   # told apart by their dotted line
 MARKERS = {"h2": "o", "h4": "s", "h2h4": "^", "h5": "D", "h2h4h5": "P", "mcts": "*"}
 SURFACE, INK, INK_2, GRID, AXIS = "#fcfcfb", "#0b0b0b", "#52514e", "#e1e0d9", "#c3c2b7"
