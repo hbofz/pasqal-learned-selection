@@ -1,0 +1,78 @@
+{
+  "val_regret": {
+    "h4": {
+      "k": 4,
+      "rule": "size",
+      "rule_regret": 0.3106508875739645,
+      "linear": 0.07692307692307693,
+      "lgbm": 0.06607495069033531
+    },
+    "h2": {
+      "k": 1,
+      "rule": "gls_term",
+      "rule_regret": 0.5859683794466403,
+      "linear": 0.020750988142292492,
+      "lgbm": 0.020750988142292492
+    }
+  },
+  "train_seconds": {
+    "lin-h4": 0.046361125001567416,
+    "lgb-h4": 0.6967095800064271,
+    "lin-h2": 0.02702597300230991,
+    "lgb-h2": 0.4385194839996984
+  },
+  "dataset": {
+    "train": {
+      "split": "train",
+      "instances": 480,
+      "counts": {
+        "h2": {
+          "states": 4052,
+          "rows": 101429
+        },
+        "h4": {
+          "states": 4058,
+          "rows": 102329
+        }
+      },
+      "deferred_states": 160,
+      "dropped": [
+        {
+          "setting": "er(p=0.1)",
+          "n": 150,
+          "hook": "h2",
+          "first": true,
+          "count": 6
+        }
+      ],
+      "label_cpu_s": 34311.863648299965,
+      "commit": "1938e93"
+    },
+    "val": {
+      "split": "val",
+      "instances": 120,
+      "counts": {
+        "h2": {
+          "states": 1012,
+          "rows": 24562
+        },
+        "h4": {
+          "states": 1014,
+          "rows": 24862
+        }
+      },
+      "deferred_states": 40,
+      "dropped": [
+        {
+          "setting": "er(p=0.1)",
+          "n": 150,
+          "hook": "h2",
+          "first": true,
+          "count": 2
+        }
+      ],
+      "label_cpu_s": 9571.394831800002,
+      "commit": "1938e93"
+    }
+  }
+}
