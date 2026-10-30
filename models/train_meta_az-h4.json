@@ -1,0 +1,44 @@
+{
+  "info": {
+    "loss": [
+      2.26245953824742,
+      2.2077378389994817,
+      2.1904666996974997,
+      2.1754656665029732,
+      2.1635764458509175,
+      2.1444912745527835,
+      2.1394105270700132,
+      2.1355093519837167,
+      2.1214650912343993,
+      2.111646654183859
+    ],
+    "states": 4058,
+    "examples": 4569,
+    "seconds": 53.924447407000116
+  },
+  "init": "models/sage-h4.pt",
+  "base_train": [
+    "cache/graphs_train_shard0of3.pkl",
+    "cache/graphs_train_shard1of3.pkl",
+    "cache/graphs_train_shard2of3.pkl"
+  ],
+  "examples": [
+    "cache/az/selfplay_it1.pkl"
+  ],
+  "max_states": null,
+  "commit": "ecaf7d4",
+  "self_play": [
+    {
+      "method": "dgin-h2+sage-h4+dsage-h5+mcts-c0.5",
+      "models": "models",
+      "budget": 100,
+      "k": 8,
+      "shard": null,
+      "instances": 480,
+      "examples": 4569,
+      "cpu_s": 421.43436099999997,
+      "wall_s": 18.697471310000765,
+      "commit": "ecaf7d4"
+    }
+  ]
+}
