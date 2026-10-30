@@ -2,12 +2,16 @@
 piece sizes, and so run counts, so one width alone can favour either side.
 
     uv run python -m learned_selection.curves results/eval/*.jsonl --out results/plots
+    uv run python -m learned_selection.curves results/eval/val.jsonl --out results/plots-val --split val
+
+Only rows on the split's seeds are read: test seeds by default, validation seeds with --split val.
 
 Against GLS's lower envelope (the best gap any GLS configuration reaches for its runs):
 - d_gap is a method's mean gap minus the envelope's gap at the method's mean runs. Below 0 is better.
 - run_ratio is the method's mean runs over the runs the envelope needs to reach the method's mean gap. Below 1 is
   better.
-Both are None where the method falls outside the envelope's range.
+Both are None where the method falls outside the envelope's range, and run_ratio is None where the method makes no
+runs. Such cells are counted by the side the method falls on.
 """
 import argparse, json, math
 from pathlib import Path
@@ -15,7 +19,7 @@ from pathlib import Path
 import numpy as np
 
 from .bench import BEAM_METHODS, gap_pct
-from .instances import HELD_OUT_SETTINGS, TEST_SEEDS, TEST_SIZES, TRAIN_SETTINGS
+from .instances import HELD_OUT_SETTINGS, TEST_SEEDS, TEST_SIZES, TRAIN_SETTINGS, VAL_SEEDS
 
 LEARNED = [m for m in BEAM_METHODS if not m.startswith("gls")]
 HEADLINE_CONFIG = (4, 2, 10, 1)   # k, s, l, restarts
@@ -104,10 +108,17 @@ def _prepare(table, cfg, baseline, runs_key):
 
 
 def _stats(runs, gaps):
-    """(d_gap, run_ratio) from per-config means, the method first and the baseline configs after it."""
+    """((d_gap, side), (run_ratio, side)) from per-config means, the method first and the baseline configs after
+    it. An undefined statistic is None, and its side says where the method falls: "beats" for fewer runs than the
+    envelope's cheapest point (d_gap), or for a lower gap than its best point or no runs at all (run_ratio);
+    "expensive" for the other direction. With no envelope both are None and have no side."""
     env = envelope((r, g) for r, g in zip(runs[1:], gaps[1:]) if r > 0)   # 0 runs has no place on a log scale
-    g, r = gap_at(env, runs[0]) if runs[0] > 0 else None, runs_at(env, gaps[0])
-    return None if g is None else gaps[0] - g, None if r is None else runs[0] / r
+    if not env:
+        return (None, None), (None, None)
+    g = gap_at(env, runs[0]) if runs[0] > 0 else None
+    r = runs_at(env, gaps[0]) if runs[0] > 0 else None    # a method with no runs has no ratio, not a ratio of 0
+    return ((gaps[0] - g, None) if g is not None else (None, "expensive" if runs[0] > env[-1][0] else "beats"),
+            (runs[0] / r, None) if r is not None else (None, "expensive" if gaps[0] > env[0][1] else "beats"))
 
 
 def _geomean(v):
@@ -115,28 +126,29 @@ def _geomean(v):
 
 
 def _gain(prepared, reps, seed) -> dict:
-    """d_gap averaged and run_ratio geometrically averaged over cells, each with a 95% bootstrap CI. A resample
-    draws instances with replacement within each cell. The average runs over the cells where the full-sample value
-    is defined; a resample where any of those cells is undefined counts in *_none."""
+    """d_gap averaged and run_ratio geometrically averaged over the cells where each is defined, each with a 95%
+    bootstrap CI. A resample draws instances with replacement within each cell and averages over the cells defined
+    in it; a resample with no defined cell counts in *_none. *_cells counts the defined cells, and *_beats and
+    *_expensive the undefined ones by the side of the envelope the method falls on."""
     rng = np.random.default_rng(seed)
     point, boot = [], []
     for R, G in prepared:
         n = R.shape[1]
-        point.append(_stats(R.mean(1).tolist(), G.mean(1).tolist()) if n else (None, None))
+        point.append(_stats(R.mean(1).tolist(), G.mean(1).tolist()) if n else ((None, None), (None, None)))
         if n:
             idx = rng.integers(0, n, (reps, n))
             Rb, Gb = R[:, idx].mean(2).T.tolist(), G[:, idx].mean(2).T.tolist()
             boot.append([_stats(a, b) for a, b in zip(Rb, Gb)])
-        else:
-            boot.append([(None, None)] * reps)
     out = {}
     for j, (name, average) in enumerate((("d_gap", lambda v: float(np.mean(v))), ("run_ratio", _geomean))):
-        cells = [c for c, p in enumerate(point) if p[j] is not None]
-        values = [[boot[c][b][j] for c in cells] for b in range(reps)] if cells else []
-        stats = [average(v) for v in values if None not in v]
+        values = [p[j][0] for p in point if p[j][0] is not None]
+        resamples = ([cell[b][j][0] for cell in boot if cell[b][j][0] is not None] for b in range(reps))
+        stats = [average(v) for v in resamples if v]
         lo, hi = np.percentile(stats, [2.5, 97.5]).tolist() if stats else (None, None)
-        out.update({name: average([point[c][j] for c in cells]) if cells else None, f"{name}_lo": lo,
-                    f"{name}_hi": hi, f"{name}_none": reps - len(stats), f"{name}_cells": len(cells)})
+        sides = [p[j][1] for p in point]
+        out.update({name: average(values) if values else None, f"{name}_lo": lo, f"{name}_hi": hi,
+                    f"{name}_none": reps - len(stats), f"{name}_cells": len(values),
+                    f"{name}_beats": sides.count("beats"), f"{name}_expensive": sides.count("expensive")})
     return out
 
 
@@ -153,14 +165,17 @@ def curve_gain(rows, method, baseline="gls", runs_key="quantum_runs", reps=2000,
     return out
 
 
-def headline(rows, runs_key, reps=2000, seed=0) -> list[dict]:
-    """Each learned method at widths (4, 2, 10) with 1 restart against gls, pooled over the training settings and
-    over the held-out settings, at the test sizes and on test seeds. Settings at BIG_N are left to the per-setting
-    tables."""
-    tables = _tables([r for r in rows if r["seed"] in TEST_SEEDS])
+def headline(rows, runs_key, reps=2000, seed=0, seeds=TEST_SEEDS) -> list[dict]:
+    """Each learned method at widths (4, 2, 10) with 1 restart against gls, pooled over cells on `seeds` only. On
+    test seeds there are two pools, the training settings and the held-out settings, at the test sizes; settings
+    at BIG_N are left to the per-setting tables. On VAL_SEEDS the one pool is the validation grid: the training
+    settings at n=100."""
+    tables = _tables([r for r in rows if r["seed"] in seeds])
+    pools = ([("validation", TRAIN_SETTINGS, (100,))] if seeds == VAL_SEEDS else
+             [("training", TRAIN_SETTINGS, TEST_SIZES), ("held-out", HELD_OUT_SETTINGS, TEST_SIZES)])
     out = []
-    for pool, settings in (("training", TRAIN_SETTINGS), ("held-out", HELD_OUT_SETTINGS)):
-        cells = [(f, json.dumps(p, sort_keys=True), n) for f, p in settings for n in TEST_SIZES]
+    for pool, settings, sizes in pools:
+        cells = [(f, json.dumps(p, sort_keys=True), n) for f, p in settings for n in sizes]
         for method in LEARNED:
             cfg = (method, *HEADLINE_CONFIG)
             prepared = [_prepare(tables[c], cfg, "gls", runs_key) for c in cells if cfg in tables.get(c, {})]
@@ -172,11 +187,11 @@ def headline(rows, runs_key, reps=2000, seed=0) -> list[dict]:
     return out
 
 
-def summarize(rows, reps=2000, seed=0) -> list[dict]:
-    """One row per cell and config: mean gap with its CI and mean run counts over finished instances, the share
-    of counted solves over 30 atoms, and how many instances exploded."""
+def summarize(rows, reps=2000, seed=0, seeds=TEST_SEEDS) -> list[dict]:
+    """One row per cell and config on `seeds`: mean gap with its CI and mean run counts over finished instances,
+    the share of counted solves over 30 atoms, and how many instances exploded."""
     groups = {}
-    for r in rows:
+    for r in (r for r in rows if r["seed"] in seeds):
         groups.setdefault((*_cell(r), *_config(r)), []).append(r)
     out = []
     for (family, params, n, method, k, s, l, restarts), recs in groups.items():
@@ -192,11 +207,12 @@ def summarize(rows, reps=2000, seed=0) -> list[dict]:
     return out
 
 
-def paired(rows, method, baseline="gls", reps=2000, seed=0) -> list[dict]:
-    """Per cell and widths at 1 restart: the mean per-instance gap difference (method minus baseline) with its CI,
-    and the mean difference in quantum runs. Instances where either side exploded are dropped and counted."""
+def paired(rows, method, baseline="gls", reps=2000, seed=0, seeds=TEST_SEEDS) -> list[dict]:
+    """Per cell and widths at 1 restart, on `seeds`: the mean per-instance gap difference (method minus baseline)
+    with its CI, and the mean difference in quantum runs. Instances where either side exploded are dropped and
+    counted."""
     out = []
-    for (family, params, n), table in _tables([r for r in rows if r["restarts"] == 1]).items():
+    for (family, params, n), table in _tables([r for r in rows if r["restarts"] == 1 and r["seed"] in seeds]).items():
         for cfg in [c for c in table if c[0] == method]:
             m, base = table[cfg], table.get((baseline, *cfg[1:]), {})
             both = [i for i in m if i in base]
@@ -283,30 +299,33 @@ def _ci(x, lo, hi, fmt=".2f") -> str:
     return "-" if x is None else f"{x:{fmt}} [{_num(lo, fmt)}, {_num(hi, fmt)}]"
 
 
-def _print_headline(rows, runs_key) -> None:
+def _print_headline(rows, runs_key, seeds) -> None:
     print(f"\nHeadline, {RUN_LABELS[runs_key]}: learned methods at widths (4, 2, 10), 1 restart, against gls; "
-          "d_gap is the mean over cells, run_ratio the geometric mean")
-    table = headline(rows, runs_key)
+          "d_gap is the mean over defined cells, run_ratio the geometric mean")
+    print("  def: defined cells; beat: undefined cells that beat the envelope; exp: undefined cells outside it on the "
+          "expensive side; none: resamples with no defined cell")
+    table = headline(rows, runs_key, seeds=seeds)
     if not table:
-        print("  no test-grid cells in these files")
+        print("  no headline cells on these seeds in these files")
         return
-    print(f"  {'pool':9}{'method':10}{'cells':>6}{'inst':>6}{'drop':>6}  {'d_gap [95% CI]':24}{'def':>4}{'none':>6}"
-          f"  {'run_ratio [95% CI]':24}{'def':>4}{'none':>6}")
+    print(f"  {'pool':11}{'method':10}{'cells':>6}{'inst':>6}{'drop':>6}  {'d_gap [95% CI]':24}{'def':>4}{'beat':>5}"
+          f"{'exp':>4}{'none':>6}  {'run_ratio [95% CI]':24}{'def':>4}{'beat':>5}{'exp':>4}{'none':>6}")
     for h in table:
-        print(f"  {h['pool']:9}{h['method']:10}{h['cells']:>6}{h['instances']:>6}{h['dropped']:>6}  "
-              f"{_ci(h['d_gap'], h['d_gap_lo'], h['d_gap_hi']):24}{h['d_gap_cells']:>4}{h['d_gap_none']:>6}  "
+        print(f"  {h['pool']:11}{h['method']:10}{h['cells']:>6}{h['instances']:>6}{h['dropped']:>6}  "
+              f"{_ci(h['d_gap'], h['d_gap_lo'], h['d_gap_hi']):24}{h['d_gap_cells']:>4}{h['d_gap_beats']:>5}"
+              f"{h['d_gap_expensive']:>4}{h['d_gap_none']:>6}  "
               f"{_ci(h['run_ratio'], h['run_ratio_lo'], h['run_ratio_hi'], '.3f'):24}{h['run_ratio_cells']:>4}"
-              f"{h['run_ratio_none']:>6}")
+              f"{h['run_ratio_beats']:>5}{h['run_ratio_expensive']:>4}{h['run_ratio_none']:>6}")
 
 
 def _print_settings(tables, summary, baseline, runs_key, cells) -> None:
     print(f"\nPer setting against {baseline}, {RUN_LABELS[runs_key]}: widths (4, 2, 10), 1 restart; "
-          "none counts resamples with d_gap/run_ratio undefined")
+          "over 30 is the share of counted solves over 30 atoms; none counts resamples with d_gap/run_ratio undefined")
     stats = {(_cell(s), s["method"]): s for s in summary if (s["k"], s["s"], s["l"], s["restarts"]) == HEADLINE_CONFIG}
     for cell in cells:
         print(f"{cell[0]} {cell[1]} n={cell[2]}")
-        print(f"    {'method':12}{'inst':>5}{'expl':>5}  {'gap % [95% CI]':22}{'q runs':>8}{'p runs':>8}  "
-              f"{'d_gap [95% CI]':24}{'run_ratio [95% CI]':24}{'drop':>5}{'none':>10}")
+        print(f"    {'method':12}{'inst':>5}{'expl':>5}  {'gap % [95% CI]':22}{'q runs':>8}{'p runs':>8}"
+              f"{'over 30':>9}  {'d_gap [95% CI]':24}{'run_ratio [95% CI]':24}{'drop':>5}{'none':>10}")
         for m in BEAM_METHODS:
             s = stats.get((cell, m))
             if s is None:
@@ -314,7 +333,8 @@ def _print_settings(tables, summary, baseline, runs_key, cells) -> None:
             R, G, dropped = _prepare(tables[cell], (m, *HEADLINE_CONFIG), baseline, runs_key)
             g = _gain([(R, G)], 2000, 0)
             print(f"    {m:12}{s['instances']:>5}{s['exploded']:>5}  {_ci(s['gap'], s['gap_lo'], s['gap_hi']):22}"
-                  f"{_num(s['quantum_runs'], '.1f'):>8}{_num(s['pasqal_runs'], '.1f'):>8}  "
+                  f"{_num(s['quantum_runs'], '.1f'):>8}{_num(s['pasqal_runs'], '.1f'):>8}"
+                  f"{_num(s['over_30_share'], '.1%'):>9}  "
                   f"{_ci(g['d_gap'], g['d_gap_lo'], g['d_gap_hi']):24}"
                   f"{_ci(g['run_ratio'], g['run_ratio_lo'], g['run_ratio_hi'], '.3f'):24}"
                   f"{dropped:>5}{str(g['d_gap_none']) + '/' + str(g['run_ratio_none']):>10}")
@@ -324,11 +344,14 @@ def main(argv=None) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("paths", nargs="+")
     ap.add_argument("--out", required=True, help="directory for the plots")
+    ap.add_argument("--split", choices=["val", "test"], default="test",
+                    help="seeds to read: validation seeds pooled over the val grid, or test seeds")
     a = ap.parse_args(argv)
-    rows = load(a.paths)
-    summary = summarize(rows)
+    seeds = VAL_SEEDS if a.split == "val" else TEST_SEEDS
+    rows = [r for r in load(a.paths) if r["seed"] in seeds]
+    summary = summarize(rows, seeds=seeds)
     for runs_key in RUN_KEYS:
-        _print_headline(rows, runs_key)
+        _print_headline(rows, runs_key, seeds)
     tables = _tables(rows)
     code_finished = {}
     for r in rows:

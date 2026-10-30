@@ -29,7 +29,7 @@ def test_bootstrap_and_paired_diff():
     assert bootstrap_ci([2.0] * 10) == (2.0, 2.0)
     rows = [dict(family="er", params={"p": 0.25}, n=40, seed=i, method=m, k=4, s=2, l=10, restarts=1, gap_pct=g,
                  quantum_runs=10, exploded=False) for i in range(5) for m, g in (("gls", 10.0), ("lin-h4", 7.0))]
-    (row,) = paired(rows, "lin-h4", "gls")
+    (row,) = paired(rows, "lin-h4", "gls", seeds=range(5))
     assert row["diff"] == row["lo"] == row["hi"] == -3.0
 
 def test_curve_gain_by_hand():

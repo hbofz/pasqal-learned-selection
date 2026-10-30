@@ -1,0 +1,82 @@
+import json, pytest
+from learned_selection.curves import curve_gain, envelope, gap_at, headline, main, runs_at
+from learned_selection.instances import HELD_OUT_SETTINGS, TEST_SEEDS, TEST_SIZES, TRAIN_SETTINGS, VAL_SEEDS
+
+# The GLS envelope in these rows runs from (10 runs, 10%) to (100 runs, 5%). At 10**1.5 runs it reads 7.5%, and it
+# reaches 6% at 10**1.8 runs.
+GLS = [((1, 1, 1), 10, 10.0), ((8, 3, 30), 100, 5.0)]
+(FA, PA), (FB, PB) = TRAIN_SETTINGS[:2]
+
+
+def _rows(family, params, n, seeds, runs, gap, method="lin-h4"):
+    """GLS at two widths and `method` at (4, 2, 10) on each seed; best known 100, so size is 100 - gap."""
+    pts = [("gls", *p) for p in GLS] + [(method, (4, 2, 10), runs, gap)]
+    return [dict(family=family, params=params, n=n, seed=i, method=m, k=k, s=s, l=l, restarts=1, exploded=False,
+                 quantum_runs=r, pasqal_runs=r, over_30=0, gap_pct=g, size=100 - g)
+            for i in seeds for m, (k, s, l), r, g in pts]
+
+
+def test_envelope_drops_dominated_points():
+    pts = [(50, 8.0), (10, 10.0), (20, 12.0), (100, 5.0), (200, 5.0), (30, 10.0)]
+    assert envelope(pts) == [(10, 10.0), (50, 8.0), (100, 5.0)]
+
+
+def test_gap_and_runs_at_interpolate_in_log_runs_across_segments():
+    env = [(10, 10.0), (100, 6.0), (1000, 4.0)]
+    assert gap_at(env, 10 ** 1.5) == pytest.approx(8.0) and gap_at(env, 10 ** 2.5) == pytest.approx(5.0)
+    assert gap_at(env, 10) == pytest.approx(10.0) and gap_at(env, 1000) == pytest.approx(4.0)
+    assert runs_at(env, 8.0) == pytest.approx(10 ** 1.5) and runs_at(env, 5.0) == pytest.approx(10 ** 2.5)
+    assert runs_at(env, 10.0) == pytest.approx(10) and runs_at(env, 4.0) == pytest.approx(1000)
+    assert gap_at(env, 9) is None and gap_at(env, 1001) is None
+    assert runs_at(env, 10.5) is None and runs_at(env, 3.9) is None
+
+
+def test_val_split_pools_training_settings_at_n100_on_val_seeds():
+    rows = (_rows(FA, PA, 100, VAL_SEEDS, 10 ** 1.5, 6.0) + _rows(FB, PB, 100, VAL_SEEDS, 10 ** 1.5, 6.0)
+            + _rows(FA, PA, 100, TEST_SEEDS[:5], 10 ** 1.5, 9.0)          # other seeds in a val cell
+            + _rows(FA, PA, 150, VAL_SEEDS, 10 ** 1.5, 9.0)               # outside the val grid
+            + _rows(*HELD_OUT_SETTINGS[0], 100, VAL_SEEDS, 10 ** 1.5, 9.0))
+    (h,) = headline(rows, "quantum_runs", reps=50, seeds=VAL_SEEDS)
+    assert (h["pool"], h["method"], h["cells"], h["instances"]) == ("validation", "lin-h4", 2, 10)
+    assert h["d_gap"] == pytest.approx(-1.5) and h["run_ratio"] == pytest.approx(10 ** -0.3)
+
+
+def test_run_ratio_is_undefined_not_zero_when_the_method_makes_no_runs():
+    (row,) = curve_gain(_rows("er", {"p": 0.75}, 100, range(3), 0, 6.0), "lin-h4", reps=50)
+    assert row["run_ratio"] is None and row["d_gap"] is None
+    assert row["run_ratio_beats"] == row["d_gap_beats"] == 1 and row["run_ratio_none"] == 50
+
+
+def test_headline_counts_undefined_cells_by_side_and_averages_the_defined_ones():
+    cells = [(FA, PA, TEST_SIZES[0]), (FA, PA, TEST_SIZES[1]), (FB, PB, TEST_SIZES[0]), (FB, PB, TEST_SIZES[1])]
+    method = [(10 ** 1.5, 6.0),   # inside: d_gap -1.5, run_ratio 10**-0.3
+              (10 ** 1.5, 4.0),   # below the best gap: d_gap -3.5, run_ratio beats the envelope
+              (1000, 6.0),        # past the most runs: d_gap expensive, run_ratio 10**1.2
+              (5, 12.0)]          # under the fewest runs and above the worst gap: d_gap beats, run_ratio expensive
+    rows = [r for (f, p, n), (runs, gap) in zip(cells, method) for r in _rows(f, p, n, TEST_SEEDS[:3], runs, gap)]
+    (h,) = headline(rows, "quantum_runs", reps=50)
+    assert h["pool"] == "training" and h["cells"] == 4
+    assert h["d_gap"] == pytest.approx(-2.5) and h["d_gap_lo"] == pytest.approx(-2.5)
+    assert h["run_ratio"] == pytest.approx(10 ** 0.45) and h["run_ratio_hi"] == pytest.approx(10 ** 0.45)
+    assert (h["d_gap_cells"], h["d_gap_beats"], h["d_gap_expensive"]) == (2, 1, 1)
+    assert (h["run_ratio_cells"], h["run_ratio_beats"], h["run_ratio_expensive"]) == (2, 1, 1)
+    assert h["d_gap_none"] == h["run_ratio_none"] == 0
+
+
+def test_a_resample_averages_over_the_cells_defined_in_it():
+    # The second cell's mean runs (52.5) are inside the envelope, but a resample drawing 5 runs twice is not.
+    rows = (_rows(FA, PA, 100, TEST_SEEDS[:2], 10 ** 1.5, 6.0)
+            + _rows(FB, PB, 100, TEST_SEEDS[:1], 5, 6.0) + _rows(FB, PB, 100, TEST_SEEDS[1:2], 100, 6.0))
+    (h,) = headline(rows, "quantum_runs", reps=200)
+    assert h["d_gap_cells"] == 2 and h["d_gap_none"] == 0
+
+
+def test_cli_val_split_reports_val_seeds_only(tmp_path, capsys):
+    rows = _rows(FA, PA, 100, VAL_SEEDS, 10 ** 1.5, 6.0) + _rows(FA, PA, 100, TEST_SEEDS[:5], 10 ** 1.5, 9.0)
+    rows += [dict(r, method="exact", k=None, s=None, l=None, size=100, proven=True) for r in rows if r["k"] == 1]
+    path = tmp_path / "val.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    main([str(path), "--out", str(tmp_path / "plots"), "--split", "val"])
+    out = capsys.readouterr().out
+    assert "validation" in out and "-1.50 [-1.50, -1.50]" in out and "over 30" in out
+    assert "9.00" not in out    # the test-seed rows, 9% gap, never reach a table
