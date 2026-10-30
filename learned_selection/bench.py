@@ -22,6 +22,7 @@ from .instances import (BIG_N, BIG_SETTINGS, HELD_OUT_SETTINGS, SEL_SEEDS, SEL_S
                         TRAIN_SETTINGS, VAL_SEEDS, make)
 from .lattice import BLOCKADE_UM
 from .models import h2_score, h4_rank, linear_value, load, load_theta, theta_score
+from .search import run_mcts
 from .solvers import exact_mis, is_independent, min_degree_greedy
 from .vendored import weighted_greedy_independent_set
 
@@ -155,8 +156,9 @@ def method_runner(name: str, models_dir, max_branches: int = 1_000) -> Callable[
     """run(graph, k, s, l, seed) for a beam method."""
     if not known_method(name) or name in CLASSICAL_METHODS:
         raise ValueError(f"unknown beam method {name!r}")
-    if search_of(name) is not None:
-        raise NotImplementedError("tree search is not available yet")
+    if search_of(name) is not None:   # l is the budget of counted solves, and max_branches does not apply
+        hooks = method_hooks(name, models_dir)
+        return lambda G, k, s, l, seed: run_mcts(G, k, s, l, c=search_of(name), seed=seed, **hooks)
     if name == "gls-code":
         return lambda G, k, s, l, seed: run_code_faithful(G, k, s, l, seed=seed, max_branches=max_branches)
     if name == "gls-paper":

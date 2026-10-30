@@ -140,9 +140,7 @@ def test_known_method_and_track():
     assert track_of("exact") == "classical"
 
 
-def test_a_search_name_has_no_runner_yet():
+def test_an_unknown_name_has_no_runner():
     from learned_selection.bench import method_runner
     with pytest.raises(ValueError):
         method_runner("foo-h2", None)
-    with pytest.raises(NotImplementedError):
-        method_runner("lin-h2+gin-h4+sage-h5+mcts", None)
