@@ -8,3 +8,5 @@ docs/superpowers/
 .claude/
 CLAUDE.md
 AGENTS.md
+cache/
+logs/

@@ -121,6 +121,18 @@ wheels = [
 ]
 
 [[package]]
+name = "cma"
+version = "4.5.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/86/d7/c92532c0a2922aacb3b7e0cf0fde5d2ba3f67c30692c8f9c4c35b9b42b68/cma-4.5.0.tar.gz", hash = "sha256:5e6774388d4a3798116bf9aff7684cf44d59f966d868f375e61811f74e132934", size = 335637, upload-time = "2026-09-13T21:49:14.757Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7a/c2/859dcb6fc39476c78fde66005883edaab09f3fc561fa52a3b9d4cc036937/cma-4.5.0-py3-none-any.whl", hash = "sha256:9b37fa8bd541f1f4cf8e2cc4f98e6f02ec89d6d39ded8ec8a90d4f44c88c62c8", size = 347222, upload-time = "2026-09-13T21:49:13.51Z" },
+]
+
+[[package]]
 name = "colorama"
 version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -309,6 +321,24 @@ wheels = [
 ]
 
 [[package]]
+name = "lightgbm"
+version = "4.7.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "narwhals" },
+    { name = "numpy" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/63/8e/4db5e29290d7e619c307fdb8dab0a0514090af2ce3ec483050e024ec6126/lightgbm-4.7.0.tar.gz", hash = "sha256:f8e20f682c9aabd000bcf4a7ed8aa6f473c1adfecccae34ec24e823d156f4af0", size = 1792896, upload-time = "2026-07-18T21:00:56.139Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cd/05/7213965863cba1ed0150ad045bceed6276a1afaaaedbaeff4699ec4f0ccb/lightgbm-4.7.0-py3-none-macosx_10_15_x86_64.whl", hash = "sha256:dfc1cfe8e760387be1e7ba7a214688be21fdff96e4ed9749188f83e1877c2477", size = 1877851, upload-time = "2026-07-18T21:00:35.225Z" },
+    { url = "https://files.pythonhosted.org/packages/b2/86/f4fe714f2e0bf3941705a20d7f6849dc476276d71236e82ea6b0d6539b86/lightgbm-4.7.0-py3-none-macosx_12_0_arm64.whl", hash = "sha256:129535462686f274df179133643118c5c5c5667167fe6c3a28d955f0b3c8e868", size = 1498914, upload-time = "2026-07-18T21:00:36.549Z" },
+    { url = "https://files.pythonhosted.org/packages/c6/a3/b29580948b92e8c2f84dea70118ac702ff067dc52ec4ffb5d73c953536a5/lightgbm-4.7.0-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:d4529acec5c6fefe4768302a529707d0ead90f6a6f42df694b856212e09695b8", size = 3349492, upload-time = "2026-07-18T21:00:37.943Z" },
+    { url = "https://files.pythonhosted.org/packages/15/eb/837ea3b40cc36e22eeebb9785c01e42b2c255d033eea1d2d9ee8e2540e55/lightgbm-4.7.0-py3-none-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:d23e922acd891e77212e4d0fbcee9ba973c96dee479491341d05ba595357ebb7", size = 3476028, upload-time = "2026-07-18T21:00:39.331Z" },
+    { url = "https://files.pythonhosted.org/packages/d5/0b/c5c17d862b12ce292f24cd85d40f2f8f8981668fbdbd43fdc2625eccbc79/lightgbm-4.7.0-py3-none-win_amd64.whl", hash = "sha256:f42d1e5b32b6f170e606d7c689c6165671da98d7bf37f1addec2623efc8740c9", size = 1360833, upload-time = "2026-07-18T21:00:40.865Z" },
+]
+
+[[package]]
 name = "matplotlib"
 version = "3.11.2"
 source = { registry = "https://pypi.org/simple" }
@@ -332,6 +362,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/84/39/02e21b74f7439bd643d717ea846006d46e309e6d29b632b57751265311d6/matplotlib-3.11.2-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:3aa4b8516fd26659e4363abbf317c703d9116496c5db2e9d0609a2866dd39dd2", size = 10810580, upload-time = "2026-09-11T19:03:31.402Z" },
     { url = "https://files.pythonhosted.org/packages/04/93/0d239bde12b308262265c2d98909b2f0ecad2b5deeae96241642e822e9c7/matplotlib-3.11.2-cp312-cp312-win_amd64.whl", hash = "sha256:c5c1c68ee401fc98271263410f0e5ce88285abacf7627132914e8adf3d70ff43", size = 9349409, upload-time = "2026-09-11T19:03:34.195Z" },
     { url = "https://files.pythonhosted.org/packages/49/a8/06baf901c02246c8a222b655cc4540ef9c15e1549a04e07927f9cde716c3/matplotlib-3.11.2-cp312-cp312-win_arm64.whl", hash = "sha256:643ff850d8e0f5b8319337f87ed3cb59506afb3df3cc48de777d85871233be7b", size = 9028084, upload-time = "2026-09-11T19:03:37.032Z" },
+]
+
+[[package]]
+name = "narwhals"
+version = "2.28.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/67/43/e11d75a7fb635c6f63dd6e176cb3e050ec2fee35f2f2267b332a6ad351ec/narwhals-2.28.0.tar.gz", hash = "sha256:2d9860c80d6610820826e94c6e42ce4b1d92d89cdd479586e652a8d211dab345", size = 754977, upload-time = "2026-10-27T12:19:33.777Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cf/82/8ef9c7e0f50493307a49c09cfa7f00c5a778b6d1921f7b2dabe1d3a5809e/narwhals-2.28.0-py3-none-any.whl", hash = "sha256:1f69d6385ec30e2fa6e1fdeb37c562ecabd0f713f6f3e3b58a668c5c9df9567f", size = 490591, upload-time = "2026-10-27T12:19:31.649Z" },
 ]
 
 [[package]]
@@ -435,6 +474,8 @@ name = "pasqal-learned-selection"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cma" },
+    { name = "lightgbm" },
     { name = "matplotlib" },
     { name = "networkx" },
     { name = "numpy" },
@@ -450,6 +491,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cma", specifier = ">=4.5.0" },
+    { name = "lightgbm", specifier = ">=4.7.0" },
     { name = "matplotlib" },
     { name = "networkx", specifier = ">=3.3" },
     { name = "numpy" },

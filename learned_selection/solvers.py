@@ -38,15 +38,18 @@ def _mis_model(graph: nx.Graph, maximal: bool):
     return m, x, nodes
 
 
-def exact_mis(graph: nx.Graph, time_limit_s: float = 60.0) -> tuple[frozenset, bool]:
-    """CP-SAT maximum independent set and whether it was proven optimal."""
+def exact_mis(graph: nx.Graph, time_limit_s: float = 60.0, workers: int = 8) -> tuple[frozenset, bool]:
+    """CP-SAT maximum independent set and whether it was proven optimal. With workers=1 the search is
+    deterministic. When the solver finds nothing at all (neither optimal nor feasible) the set is empty."""
     if len(graph) == 0:
         return frozenset(), True
     m, x, nodes = _mis_model(graph, maximal=False)
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = time_limit_s
-    solver.parameters.num_workers = 8
+    solver.parameters.num_workers = workers
     status = solver.Solve(m)
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        return frozenset(), False
     S = frozenset(nodes[i] for i in range(len(nodes)) if solver.Value(x[i]))
     return S, status == cp_model.OPTIMAL
 
@@ -64,7 +67,8 @@ def top_maximal_sets(graph: nx.Graph, s: int) -> list[frozenset]:
         status = solver.Solve(m)
         if status == cp_model.INFEASIBLE:
             break
-        assert status == cp_model.OPTIMAL, f"piece solve not optimal: {solver.StatusName(status)}"
+        if status != cp_model.OPTIMAL:
+            raise RuntimeError(f"piece solve not optimal: {solver.StatusName(status)}")
         chosen = [i for i in range(len(nodes)) if solver.Value(x[i])]
         out.append(frozenset(nodes[i] for i in chosen))
         others = [x[i] for i in range(len(nodes)) if i not in set(chosen)]

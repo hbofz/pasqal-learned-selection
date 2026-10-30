@@ -1,14 +1,16 @@
 """The beam engine: one loop, three injected callables (generate pieces, solve a piece, prune branches).
 
-Code-faithful mode mirrors vendored greedy_subgraph_solver_vv.solve_breadthfirst call for call,
-including the order of calls into the global `random` state that the vendored code reseeds.
+Code-faithful mode mirrors vendored greedy_subgraph_solver_vv.solve_breadthfirst call for call.
+gls_generator is a fast port of the vendored growth that leaves the global `random` state alone;
+vendored_gls_generator is the original, which reseeds it, and Pasqal's own piece solver needs it for an exact match.
 """
 import copy, random, time
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Sequence
 
 import networkx as nx
 
+from .growth import VertexScore, code_start_trap, gls_score, grow_piece, lattice_adjacency
 from .lattice import BLOCKADE_UM, CENTER_TRAP, load_coords, lattice_graph, is_valid_piece
 from .solvers import canonical, first_maximum_set, is_independent, top_maximal_sets
 from .vendored import GreedyMapping, Lattice, greedy_subgraph_solver_vv, weighted_generate_different_mis
@@ -18,6 +20,7 @@ Generator = Callable[[nx.Graph, int], list[Mapping]]             # (current grap
 PieceSolver = Callable[[nx.Graph, Mapping, int], list[frozenset]]  # (piece, mapping, s) -> up to s sets
 Branch = tuple[nx.Graph, list]                                   # (remaining graph, partial solution)
 Pruner = Callable[[list[Branch], int], list[Branch]]             # (next level, solver children) -> kept
+Rank = Callable[[nx.Graph, list[Mapping]], Sequence[float]]      # (current graph, candidate pieces) -> one rank each
 
 
 @dataclass
@@ -30,6 +33,7 @@ class RunResult:
     rounds: int
     classical_s: float
     solver_s: float
+    run_sizes: list[int]   # node count of every counted solve, in the order they happen
 
 
 def _check_trap_order(coords: dict) -> None:
@@ -38,8 +42,9 @@ def _check_trap_order(coords: dict) -> None:
         raise ValueError("lattice trap ids must be 0..n-1 in insertion order")
 
 
-def gls_generator(coords=None, blockade=BLOCKADE_UM, seed=0) -> Generator:
-    """Vendored obtain_embeddable_subgraphs: grow a piece from every vertex, keep the k largest."""
+def vendored_gls_generator(coords=None, blockade=BLOCKADE_UM, seed=0) -> Generator:
+    """Vendored obtain_embeddable_subgraphs: grow a piece from every vertex, keep the k largest.
+    Slow (it deep-copies the graph for every start vertex); kept as the reference the fast port is tested against."""
     coords = load_coords() if coords is None else coords
     _check_trap_order(coords)
     lattice = Lattice(coords, blockade, seed=seed)
@@ -48,6 +53,24 @@ def gls_generator(coords=None, blockade=BLOCKADE_UM, seed=0) -> Generator:
         maps = [GreedyMapping(g, copy.deepcopy(lattice), [], seed=seed).generate_greedy_ud_subgraph_with(v)
                 for v in g.nodes()]
         return sorted(maps, key=len, reverse=True)[:k]
+    return generate
+
+
+def gls_generator(coords=None, blockade=BLOCKADE_UM, seed=0, score: VertexScore | None = None,
+                  rank: Rank | None = None) -> Generator:
+    """GLS as the vendored code runs it: grow a piece from every vertex, keep the k of highest rank
+    (by default the k largest). `score` replaces the vertex priority used during growth."""
+    coords = load_coords() if coords is None else coords
+    _check_trap_order(coords)
+    adj, avg_degree = lattice_adjacency(coords, blockade)
+    start_trap = code_start_trap(len(adj))
+    make_scorer = score or gls_score(avg_degree)
+
+    def generate(g: nx.Graph, k: int) -> list[Mapping]:
+        scorer = make_scorer(g)
+        maps = [grow_piece(g, v, adj, start_trap, random.Random(seed), scorer) for v in g.nodes()]
+        ranks = [len(m) for m in maps] if rank is None else rank(g, maps)
+        return [maps[i] for i in sorted(range(len(maps)), key=ranks.__getitem__, reverse=True)[:k]]
     return generate
 
 
@@ -67,13 +90,14 @@ def exact_piece_solver(piece: nx.Graph, mapping: Mapping, s: int) -> list[frozen
     return top_maximal_sets(piece, s)
 
 
-def code_prune(k: int, l: int) -> Pruner:
-    """Pasqal's code: prune to k only once the running count of solver children passes l."""
+def code_prune(k: int, l: int, count_small: bool = False) -> Pruner:
+    """Pasqal's code: prune to k only once the running count of solver children passes l.
+    With count_small every child counts, so levels made of small pieces still get pruned."""
     counter = 0
 
     def prune(level: list[Branch], children: int) -> list[Branch]:
         nonlocal counter
-        counter += children
+        counter += len(level) if count_small else children
         if counter > l:
             counter = 0
             return sorted(level, key=lambda b: len(b[1]), reverse=True)[:k]
@@ -89,6 +113,7 @@ def _remove_closed(g: nx.Graph, S) -> nx.Graph:
 
 def run_beam(graph: nx.Graph, generate: Generator, solve: PieceSolver, k: int, s: int, prune: Pruner,
              small: int = 5, max_branches: int = 1_000, lattice: nx.Graph | None = None) -> RunResult:
+    """Generators and pruners carry state, so build fresh ones for each run, and parallelise with processes."""
     start = time.perf_counter()
     L = lattice_graph(load_coords()) if lattice is None else lattice
     if all(type(v) is int for v in graph):
@@ -101,6 +126,7 @@ def run_beam(graph: nx.Graph, generate: Generator, solve: PieceSolver, k: int, s
     queue: list[Branch] = [(g0, [])]
     best: list = []
     quantum_runs = pasqal_runs = atoms = rounds = 0
+    run_sizes: list[int] = []
     solver_s = 0.0
     while queue:
         next_level: list[Branch] = []
@@ -109,6 +135,7 @@ def run_beam(graph: nx.Graph, generate: Generator, solve: PieceSolver, k: int, s
             if len(g) <= small:
                 if len(g):
                     quantum_runs += 1
+                    run_sizes.append(len(g))
                 total = sol + first_maximum_set(g)
                 if len(total) > len(best):
                     best = total
@@ -120,6 +147,7 @@ def run_beam(graph: nx.Graph, generate: Generator, solve: PieceSolver, k: int, s
                     raise AssertionError(f"generator produced a piece that does not fit the lattice: {m}")
                 piece = g.subgraph(m)
                 quantum_runs += 1
+                run_sizes.append(len(m))
                 if piece.number_of_nodes() <= small:
                     S = first_maximum_set(piece)
                     next_level.append((_remove_closed(g, S), sol + S))
@@ -146,12 +174,21 @@ def run_beam(graph: nx.Graph, generate: Generator, solve: PieceSolver, k: int, s
         raise AssertionError("final answer is not an independent set of the original graph")
     total_s = time.perf_counter() - start
     return RunResult(solution, len(solution), quantum_runs, pasqal_runs, atoms, rounds,
-                     total_s - solver_s, solver_s)
+                     total_s - solver_s, solver_s, run_sizes)
 
 
 def run_code_faithful(graph: nx.Graph, k: int, s: int, l: int, solve: PieceSolver = exact_piece_solver,
-                      seed: int = 0, small: int = 5) -> RunResult:
-    return run_beam(graph, gls_generator(seed=seed), solve, k, s, code_prune(k, l), small)
+                      seed: int = 0, small: int = 5, max_branches: int = 1_000) -> RunResult:
+    return run_beam(graph, gls_generator(seed=seed), solve, k, s, code_prune(k, l), small, max_branches)
+
+
+def run_code_bounded(graph: nx.Graph, k: int, s: int, l: int, score: VertexScore | None = None,
+                     rank: Rank | None = None, solve: PieceSolver = exact_piece_solver, seed: int = 0,
+                     small: int = 5, max_branches: int = 1_000) -> RunResult:
+    """The code loop with a pruner that also counts small-piece children, so graphs that split into many
+    small pieces (isolated vertices, say) stay bounded. `score` and `rank` are the generator's hooks."""
+    return run_beam(graph, gls_generator(seed=seed, score=score, rank=rank), solve, k, s,
+                    code_prune(k, l, count_small=True), small, max_branches)
 
 
 class CenterSeededMapping(GreedyMapping):
@@ -185,8 +222,8 @@ def paper_prune(l: int) -> Pruner:
 
 
 def run_paper_faithful(graph: nx.Graph, k: int, s: int, l: int, solve: PieceSolver = exact_piece_solver,
-                       seed: int = 0, small: int = 5) -> RunResult:
-    return run_beam(graph, paper_generator(seed=seed), solve, k, s, paper_prune(l), small)
+                       seed: int = 0, small: int = 5, max_branches: int = 1_000) -> RunResult:
+    return run_beam(graph, paper_generator(seed=seed), solve, k, s, paper_prune(l), small, max_branches)
 
 
 def best_of_restarts(run: Callable[[int], RunResult], restarts: int) -> RunResult:
@@ -195,4 +232,5 @@ def best_of_restarts(run: Callable[[int], RunResult], restarts: int) -> RunResul
     best = max(rs, key=lambda r: r.size)
     total = lambda f: sum(getattr(r, f) for r in rs)
     return RunResult(best.solution, best.size, total("quantum_runs"), total("pasqal_runs"), total("atoms"),
-                     total("rounds"), total("classical_s"), total("solver_s"))
+                     total("rounds"), total("classical_s"), total("solver_s"),
+                     [x for r in rs for x in r.run_sizes])
