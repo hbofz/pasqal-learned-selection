@@ -43,7 +43,7 @@ def run_instance(n, p, seed, k, s, l, restarts, time_limit_s) -> list[dict]:
     best = max(len(r["solution"]) for r in rows)
     for r in rows:
         S = r.pop("solution")
-        assert is_independent(G, S), f"{r['method']} returned a non-independent set"   # R2
+        assert is_independent(G, S), f"{r['method']} returned a non-independent set"
         r.update(family="er", n=n, p=p, seed=seed, lattice="fresnel_61", includes_classical_time=True,
                  size=len(S), best_known=best, proven=proven["r"][1], gap_pct=gap_pct(len(S), best))
     return rows

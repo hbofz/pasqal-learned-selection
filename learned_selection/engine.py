@@ -24,7 +24,7 @@ Pruner = Callable[[list[Branch], int], list[Branch]]             # (next level, 
 class RunResult:
     solution: frozenset
     size: int
-    quantum_runs: int   # every subproblem solve: pieces of any size plus non-empty leftovers (R3)
+    quantum_runs: int   # every subproblem solve: pieces of any size plus non-empty leftovers
     pasqal_runs: int    # piece-solver calls only, Pasqal's convention
     atoms: int          # sum of piece sizes over piece-solver calls
     rounds: int
@@ -117,7 +117,7 @@ def run_beam(graph: nx.Graph, generate: Generator, solve: PieceSolver, k: int, s
                 if not m:
                     raise ValueError("generator returned an empty piece")   # would never shrink the branch
                 if not is_valid_piece(g, m, L):
-                    raise AssertionError(f"generator produced a piece that does not fit the lattice: {m}")  # R1
+                    raise AssertionError(f"generator produced a piece that does not fit the lattice: {m}")
                 piece = g.subgraph(m)
                 quantum_runs += 1
                 if piece.number_of_nodes() <= small:
@@ -143,7 +143,7 @@ def run_beam(graph: nx.Graph, generate: Generator, solve: PieceSolver, k: int, s
 
     solution = frozenset(best) if back is None else frozenset(back[v] for v in best)
     if not is_independent(graph, solution):
-        raise AssertionError("final answer is not an independent set of the original graph")   # R2
+        raise AssertionError("final answer is not an independent set of the original graph")
     total_s = time.perf_counter() - start
     return RunResult(solution, len(solution), quantum_runs, pasqal_runs, atoms, rounds,
                      total_s - solver_s, solver_s)

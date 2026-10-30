@@ -9,7 +9,7 @@ its one calibrated layout is TriangularLatticeLayout(120, 5.0 um), which contain
 identical coordinates, but min_layout_filling 0.35 means a register on it needs 42 to 60 atoms. Its channel
 limits are also lower (max_amp 11.31, max_abs_detuning 62.83 rad/us), so piece_sequence clips the schedule.
 
-Job results are bitstring -> count dicts, bit i belonging to the register's i-th qubit in insertion order (R4).
+Job results are bitstring -> count dicts, bit i belonging to the register's i-th qubit in insertion order, never by sorted qubit ids.
 """
 import re, subprocess
 from collections import Counter

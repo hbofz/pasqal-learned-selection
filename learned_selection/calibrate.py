@@ -1,4 +1,4 @@
-"""Calibrate the exact classical stand-in against a Pasqal cloud emulator (spec section 5).
+"""Calibrate the exact classical stand-in against a Pasqal cloud emulator.
 
     uv run python -m learned_selection.calibrate [--set small|medium]
 
@@ -85,10 +85,10 @@ def main():
           f"random {statistics.mean(r['rnd_raw_opt_rate'] for r in rows):.3f}; emulator beats random on {beats:.0%}")
     print(f"raw invalid-shot rate, mean: emulator {statistics.mean(r['emu_invalid_rate'] for r in rows):.3f}")
     print(f"top-1 set overlap (Jaccard) exact vs emulator, mean: {statistics.mean(r['top1_jaccard'] for r in rows):.3f}")
-    print("decision rule (my call): stand-in OK if emulator top-1 optimal >= 90% AND emulator beats random >= 90%")
+    print("decision rule: stand-in OK if emulator top-1 optimal >= 90% AND emulator beats random >= 90%")
     lo, hi = min(r["n_atoms"] for r in rows), max(r["n_atoms"] for r in rows)
     print("verdict:", f"stand-in OK for pieces of {lo}-{hi} atoms only" if emu_top1 >= 0.9 and beats >= 0.9
-          else f"REPORT TO HAMZAH: stand-in not validated for {lo}-{hi} atoms")
+          else f"stand-in NOT validated for {lo}-{hi} atoms")
     if rnd_top1 >= 0.9:
         print("note: random bitstrings plus repair also reach the optimum, so repair, not the quantum solve, "
               "does most of the work at these piece sizes")
