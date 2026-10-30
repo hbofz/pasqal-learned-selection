@@ -1,5 +1,5 @@
 import json, pytest
-from learned_selection.curves import curve_gain, envelope, gap_at, headline, main, runs_at
+from learned_selection.curves import curve_gain, envelope, gap_at, headline, main, plot, runs_at
 from learned_selection.instances import HELD_OUT_SETTINGS, TEST_SEEDS, TEST_SIZES, TRAIN_SETTINGS, VAL_SEEDS
 
 # The GLS envelope in these rows runs from (10 runs, 10%) to (100 runs, 5%). At 10**1.5 runs it reads 7.5%, and it
@@ -80,3 +80,19 @@ def test_cli_val_split_reports_val_seeds_only(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "validation" in out and "-1.50 [-1.50, -1.50]" in out and "over 30" in out
     assert "9.00" not in out    # the test-seed rows, 9% gap, never reach a table
+
+
+def test_headline_takes_another_baseline():
+    rows = [dict(r, method="lin-h2h4") if r["method"] == "gls" else r
+            for r in _rows(FA, PA, TEST_SIZES[0], TEST_SEEDS, 10 ** 1.5, 6.0, method="gin-h2")]
+    out = headline(rows, "quantum_runs", baseline="lin-h2h4")
+    (row,) = [h for h in out if h["method"] == "gin-h2"]
+    assert row["d_gap"] == pytest.approx(-1.5) and row["baseline"] == "lin-h2h4"
+
+
+def test_plot_draws_composed_methods(tmp_path):
+    rows = [dict(family="er", params={"p": 0.25}, n=100, method=m, k=k, s=2, l=10, restarts=1, gap=g, gap_lo=g - 1,
+                 gap_hi=g + 1, quantum_runs=r, pasqal_runs=r)
+            for m in ("gls", "lin-h2h4", "gin-h2h4h5", "lin-h2h4+gin-h5", "sage-h5") for k, r, g in ((2, 10, 9.0), (4, 30, 7.0))]
+    assert len(plot(rows, tmp_path)) == 1
+    assert len(plot(rows, tmp_path / "some", methods=["gls", "sage-h5"])) == 1

@@ -18,10 +18,10 @@ from pathlib import Path
 
 import numpy as np
 
-from .bench import BEAM_METHODS, gap_pct
+from .bench import BEAM_METHODS, ORACLE_METHODS, gap_pct, parse_method
 from .instances import HELD_OUT_SETTINGS, TEST_SEEDS, TEST_SIZES, TRAIN_SETTINGS, VAL_SEEDS
 
-LEARNED = [m for m in BEAM_METHODS if not m.startswith("gls")]
+LEARNED = [m for m in BEAM_METHODS if not m.startswith("gls") and m not in ORACLE_METHODS]
 HEADLINE_CONFIG = (4, 2, 10, 1)   # k, s, l, restarts
 RUN_KEYS = ("quantum_runs", "pasqal_runs")
 
@@ -165,8 +165,9 @@ def curve_gain(rows, method, baseline="gls", runs_key="quantum_runs", reps=2000,
     return out
 
 
-def headline(rows, runs_key, reps=2000, seed=0, seeds=TEST_SEEDS) -> list[dict]:
-    """Each learned method at widths (4, 2, 10) with 1 restart against gls, pooled over cells on `seeds` only. On
+def headline(rows, runs_key, reps=2000, seed=0, seeds=TEST_SEEDS, baseline="gls") -> list[dict]:
+    """Each learned method at widths (4, 2, 10) with 1 restart against `baseline` (which is skipped as a method),
+    pooled over cells on `seeds` only. On
     test seeds there are two pools, the training settings and the held-out settings, at the test sizes; settings
     at BIG_N are left to the per-setting tables. On VAL_SEEDS the one pool is the validation grid: the training
     settings at n=100."""
@@ -176,11 +177,11 @@ def headline(rows, runs_key, reps=2000, seed=0, seeds=TEST_SEEDS) -> list[dict]:
     out = []
     for pool, settings, sizes in pools:
         cells = [(f, json.dumps(p, sort_keys=True), n) for f, p in settings for n in sizes]
-        for method in LEARNED:
+        for method in (m for m in LEARNED if m != baseline):
             cfg = (method, *HEADLINE_CONFIG)
-            prepared = [_prepare(tables[c], cfg, "gls", runs_key) for c in cells if cfg in tables.get(c, {})]
+            prepared = [_prepare(tables[c], cfg, baseline, runs_key) for c in cells if cfg in tables.get(c, {})]
             if prepared:
-                out.append(dict(pool=pool, method=method, runs_key=runs_key, cells=len(prepared),
+                out.append(dict(pool=pool, method=method, baseline=baseline, runs_key=runs_key, cells=len(prepared),
                                 instances=sum(R.shape[1] for R, _, _ in prepared),
                                 dropped=sum(d for _, _, d in prepared),
                                 **_gain([(R, G) for R, G, _ in prepared], reps, seed)))
@@ -227,18 +228,34 @@ def paired(rows, method, baseline="gls", reps=2000, seed=0, seeds=TEST_SEEDS) ->
     return out
 
 
-# Colour follows the method, never its position: GLS variants and model kinds take fixed slots of a palette that
-# stays distinguishable under colour-vision deficiency; the hook is the marker.
-COLORS = {"gls": "#2a78d6", "lin": "#eb6834", "lgb": "#1baf7a", "cma": "#eda100", "gls-screen": "#e87ba4",
-          "gls-paper": "#008300", "gls-code": "#6250d6"}
-MARKERS = {"h2": "o", "h4": "s", "h2h4": "^"}
+# Colour follows the model kind, never its position: GLS variants and kinds take fixed slots of a palette whose
+# adjacent pairs stay distinguishable under colour-vision deficiency (checked in this order: gls, lin, lgb, cma,
+# gin, sage, gat, gls-screen). The hook set is the marker, a mix of kinds is dash-dot, and a legend names every line,
+# so colour is never the only code. Orange and red are close, so lin and gin lean on marker and legend.
+COLORS = {"gls": "#2a78d6", "lin": "#eb6834", "lgb": "#1baf7a", "cma": "#eda100", "gin": "#e34948",
+          "sage": "#6250d6", "gat": "#008300", "gls-screen": "#e87ba4", "gls-paper": "#a3a29a",
+          "gls-code": "#6e6d68", "exact": "#0b0b0b"}
+MARKERS = {"h2": "o", "h4": "s", "h2h4": "^", "h5": "D", "h2h4h5": "P"}
 SURFACE, INK, INK_2, GRID, AXIS = "#fcfcfb", "#0b0b0b", "#52514e", "#e1e0d9", "#c3c2b7"
 RUN_LABELS = {"quantum_runs": "quantum runs", "pasqal_runs": "piece-solver runs"}
 
 
-def plot(summary, out_dir, runs_key="quantum_runs") -> list[Path]:
+def _style(method: str) -> tuple[str, str, bool]:
+    """(colour, marker, mixes kinds) of a beam method. A composed name takes the colour of the kind that provides
+    its last hook and the marker of its joined hook set."""
+    if method.startswith("gls"):
+        return COLORS[method], "o", False
+    if method.startswith("cma-"):
+        return COLORS["cma"], MARKERS["h2"], False
+    parts = parse_method(method)
+    kind = max(parts, key=lambda p: p[1])[0]
+    return COLORS[kind], MARKERS["".join(sorted({h for _, h in parts}))], len({k for k, _ in parts}) > 1
+
+
+def plot(summary, out_dir, runs_key="quantum_runs", methods=None) -> list[Path]:
     """One PNG per cell: mean gap (with 95% CI bars) against mean runs on a log scale, one line per beam method
-    through its widths at 1 restart, and one dashed line per method and larger restart count."""
+    through its widths at 1 restart, and one dashed line per method and larger restart count. Only `methods` are
+    drawn when given."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -247,7 +264,8 @@ def plot(summary, out_dir, runs_key="quantum_runs") -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     cells = {}
     for r in summary:
-        if r["method"] in BEAM_METHODS and r["gap"] is not None and r[runs_key]:
+        if (r["method"] in BEAM_METHODS and (methods is None or r["method"] in methods)
+                and r["gap"] is not None and r[runs_key]):
             cells.setdefault((r["family"], json.dumps(r["params"], sort_keys=True), r["n"]), []).append(r)
     paths = []
     for (family, params, n), recs in cells.items():
@@ -258,13 +276,12 @@ def plot(summary, out_dir, runs_key="quantum_runs") -> list[Path]:
         ax.set_facecolor(SURFACE)
         for (method, restarts), pts in sorted(series.items(), key=lambda kv: (BEAM_METHODS.index(kv[0][0]), kv[0][1])):
             pts.sort(key=lambda r: r[runs_key])
-            kind, _, hook = method.partition("-")
-            color, marker = (COLORS[method], "o") if kind == "gls" else (COLORS[kind], MARKERS[hook])
+            color, marker, mixed = _style(method)
             single = restarts == 1
             x, y = [r[runs_key] for r in pts], [r["gap"] for r in pts]
             ax.errorbar(x, y, yerr=[[r["gap"] - r["gap_lo"] for r in pts], [r["gap_hi"] - r["gap"] for r in pts]],
                         fmt="none", ecolor=color, elinewidth=0.9, alpha=0.5)
-            ax.plot(x, y, color=color, lw=1.6, ls="-" if single else "--", marker=marker, ms=6,
+            ax.plot(x, y, color=color, lw=1.6, ls=("-." if mixed else "-") if single else "--", marker=marker, ms=6,
                     mfc=color if single else SURFACE, mec=SURFACE if single else color, mew=1.2 if single else 1.4,
                     label=method if single else f"{method}, {restarts} restarts")
         ax.set_xscale("log")
@@ -299,19 +316,19 @@ def _ci(x, lo, hi, fmt=".2f") -> str:
     return "-" if x is None else f"{x:{fmt}} [{_num(lo, fmt)}, {_num(hi, fmt)}]"
 
 
-def _print_headline(rows, runs_key, seeds) -> None:
-    print(f"\nHeadline, {RUN_LABELS[runs_key]}: learned methods at widths (4, 2, 10), 1 restart, against gls; "
+def _print_headline(rows, runs_key, seeds, baseline) -> None:
+    print(f"\nHeadline, {RUN_LABELS[runs_key]}: learned methods at widths (4, 2, 10), 1 restart, against {baseline}; "
           "d_gap is the mean over defined cells, run_ratio the geometric mean")
     print("  def: defined cells; beat: undefined cells that beat the envelope; exp: undefined cells outside it on the "
           "expensive side; none: resamples with no defined cell")
-    table = headline(rows, runs_key, seeds=seeds)
+    table = headline(rows, runs_key, seeds=seeds, baseline=baseline)
     if not table:
         print("  no headline cells on these seeds in these files")
         return
-    print(f"  {'pool':11}{'method':10}{'cells':>6}{'inst':>6}{'drop':>6}  {'d_gap [95% CI]':24}{'def':>4}{'beat':>5}"
+    print(f"  {'pool':11}{'method':18}{'cells':>6}{'inst':>6}{'drop':>6}  {'d_gap [95% CI]':24}{'def':>4}{'beat':>5}"
           f"{'exp':>4}{'none':>6}  {'run_ratio [95% CI]':24}{'def':>4}{'beat':>5}{'exp':>4}{'none':>6}")
     for h in table:
-        print(f"  {h['pool']:11}{h['method']:10}{h['cells']:>6}{h['instances']:>6}{h['dropped']:>6}  "
+        print(f"  {h['pool']:11}{h['method']:18}{h['cells']:>6}{h['instances']:>6}{h['dropped']:>6}  "
               f"{_ci(h['d_gap'], h['d_gap_lo'], h['d_gap_hi']):24}{h['d_gap_cells']:>4}{h['d_gap_beats']:>5}"
               f"{h['d_gap_expensive']:>4}{h['d_gap_none']:>6}  "
               f"{_ci(h['run_ratio'], h['run_ratio_lo'], h['run_ratio_hi'], '.3f'):24}{h['run_ratio_cells']:>4}"
@@ -324,7 +341,7 @@ def _print_settings(tables, summary, baseline, runs_key, cells) -> None:
     stats = {(_cell(s), s["method"]): s for s in summary if (s["k"], s["s"], s["l"], s["restarts"]) == HEADLINE_CONFIG}
     for cell in cells:
         print(f"{cell[0]} {cell[1]} n={cell[2]}")
-        print(f"    {'method':12}{'inst':>5}{'expl':>5}  {'gap % [95% CI]':22}{'q runs':>8}{'p runs':>8}"
+        print(f"    {'method':18}{'inst':>5}{'expl':>5}  {'gap % [95% CI]':22}{'q runs':>8}{'p runs':>8}"
               f"{'over 30':>9}  {'d_gap [95% CI]':24}{'run_ratio [95% CI]':24}{'drop':>5}{'none':>10}")
         for m in BEAM_METHODS:
             s = stats.get((cell, m))
@@ -332,7 +349,7 @@ def _print_settings(tables, summary, baseline, runs_key, cells) -> None:
                 continue
             R, G, dropped = _prepare(tables[cell], (m, *HEADLINE_CONFIG), baseline, runs_key)
             g = _gain([(R, G)], 2000, 0)
-            print(f"    {m:12}{s['instances']:>5}{s['exploded']:>5}  {_ci(s['gap'], s['gap_lo'], s['gap_hi']):22}"
+            print(f"    {m:18}{s['instances']:>5}{s['exploded']:>5}  {_ci(s['gap'], s['gap_lo'], s['gap_hi']):22}"
                   f"{_num(s['quantum_runs'], '.1f'):>8}{_num(s['pasqal_runs'], '.1f'):>8}"
                   f"{_num(s['over_30_share'], '.1%'):>9}  "
                   f"{_ci(g['d_gap'], g['d_gap_lo'], g['d_gap_hi']):24}"
@@ -346,21 +363,28 @@ def main(argv=None) -> None:
     ap.add_argument("--out", required=True, help="directory for the plots")
     ap.add_argument("--split", choices=["val", "test"], default="test",
                     help="seeds to read: validation seeds pooled over the val grid, or test seeds")
+    ap.add_argument("--baselines", default="gls,lin-h2h4",
+                    help="comma list: the methods the headline and per-setting tables compare against")
+    ap.add_argument("--plot-methods", help="comma list of methods to draw; default all")
     a = ap.parse_args(argv)
     seeds = VAL_SEEDS if a.split == "val" else TEST_SEEDS
     rows = [r for r in load(a.paths) if r["seed"] in seeds]
     summary = summarize(rows, seeds=seeds)
-    for runs_key in RUN_KEYS:
-        _print_headline(rows, runs_key, seeds)
+    baselines = a.baselines.split(",")
+    for baseline in baselines:
+        for runs_key in RUN_KEYS:
+            _print_headline(rows, runs_key, seeds, baseline)
     tables = _tables(rows)
     code_finished = {}
     for r in rows:
         if r["method"] == "gls-code":
             code_finished[_cell(r)] = code_finished.get(_cell(r), True) and not r["exploded"]
-    for baseline, cells in (("gls", sorted(tables)), ("gls-code", sorted(c for c, ok in code_finished.items() if ok))):
+    for baseline, cells in [(b, sorted(tables)) for b in baselines] + [
+            ("gls-code", sorted(c for c, ok in code_finished.items() if ok))]:
         for runs_key in RUN_KEYS:
             _print_settings(tables, summary, baseline, runs_key, cells)
-    paths = [p for runs_key in RUN_KEYS for p in plot(summary, a.out, runs_key)]
+    plot_methods = a.plot_methods and a.plot_methods.split(",")
+    paths = [p for runs_key in RUN_KEYS for p in plot(summary, a.out, runs_key, plot_methods)]
     print(f"\nwrote {len(paths)} plots to {a.out}")
 
 
