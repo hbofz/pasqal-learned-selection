@@ -1,8 +1,10 @@
 import networkx as nx, numpy as np, pytest
-from learned_selection.dataset import children_values, mis_membership, q_values
-from learned_selection.engine import _remove_closed, gls_generator
+from learned_selection.dataset import children_values, collect_states, mis_membership, q_values
+from learned_selection.engine import _remove_closed, code_prune, exact_piece_solver, gls_generator, run_beam
+from learned_selection.features import VERTEX_FEATURES
 from learned_selection.graphdata import graph_of, label_graphs, state_record
-from learned_selection.instances import TEST_SEEDS, erdos_renyi
+from learned_selection.instances import TEST_SEEDS, erdos_renyi, make
+from learned_selection.models import LinearModel, h2_score, save
 from learned_selection.solvers import exact_mis, first_maximum_set, top_maximal_sets
 
 def _sets(g, m):
@@ -77,3 +79,45 @@ def test_hook_counts_read_rows_from_the_records(capsys):
     summarize([meta], [a, b, c])
     out = capsys.readouterr().out
     assert "h2: 2 states labelled (17 rows)" in out and "h4: 1 states labelled (3 rows)" in out
+
+def test_no_policy_keeps_the_gls_states_and_candidates():
+    G = make("er", 40, 3, p=0.1)
+    a = collect_states(G, seed=3, max_states=1000)
+    seen, generate = {}, gls_generator()     # the plain GLS beam, written out here so this test does not read its own code
+    def record(g, k):
+        seen.setdefault(frozenset(g), g)
+        return generate(g, k)
+    run_beam(G, record, exact_piece_solver, 4, 2, code_prune(4, 10, count_small=True))
+    assert [set(x) for x in a] == [set(x) for x in seen.values()]
+    rec = state_record(a[0], True, 20.0, 1)
+    assert [set(m) for m in gls_generator()(a[0], len(a[0]))] == [set(p.tolist()) for p in rec["pieces"]]
+
+def test_policy_changes_the_states_and_the_candidates():
+    G = make("er", 60, 3, p=0.1)
+    score = lambda g: (lambda grow, cands: [-g.degree(v) for v in cands])    # prefer low degree
+    states = collect_states(G, seed=3, score=score)
+    assert {frozenset(x) for x in states} != {frozenset(x) for x in collect_states(G, seed=3)}
+    rec = state_record(G, True, 20.0, 1, score=score)
+    gls = state_record(G, True, 20.0, 1)
+    assert {frozenset(p.tolist()) for p in rec["pieces"]} != {frozenset(p.tolist()) for p in gls["pieces"]}
+    assert (rec["member"] == gls["member"]).all() and rec["alpha"] == gls["alpha"]
+
+def test_label_graphs_with_a_policy_uses_its_hooks(tmp_path):
+    w = np.random.default_rng(0).normal(size=len(VERTEX_FEATURES))
+    model = LinearModel(np.zeros(len(VERTEX_FEATURES)), np.ones(len(VERTEX_FEATURES)), w)
+    save(model, tmp_path / "lin-h2.json")
+    r = label_graphs("er", {"p": 0.1}, 40, 3, policy="lin-h2", models_dir=tmp_path)
+    G = make("er", 40, 3, p=0.1)
+    score = h2_score(model)
+    states = collect_states(G, seed=3, score=score)
+    assert not r["deferred"] and [rec["n"] for rec in r["states"]] == [len(g) for g in states]
+    for rec, g in zip(r["states"], states):
+        want = state_record(g, set(g) == set(G), 60.0, 1, score=score)
+        assert [p.tolist() for p in rec["pieces"]] == [p.tolist() for p in want["pieces"]]
+        assert rec["first"] == want["first"] and rec["alpha"] == want["alpha"]
+    plain = label_graphs("er", {"p": 0.1}, 40, 3)
+    assert [p.tolist() for p in r["states"][0]["pieces"]] != [p.tolist() for p in plain["states"][0]["pieces"]]
+
+def test_label_graphs_refuses_selection_seeds():
+    with pytest.raises(ValueError):
+        label_graphs("er", {"p": 0.1}, 40, 105)
