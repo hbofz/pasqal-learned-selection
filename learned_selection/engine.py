@@ -1,14 +1,16 @@
 """The beam engine: one loop, three injected callables (generate pieces, solve a piece, prune branches).
 
-Code-faithful mode mirrors vendored greedy_subgraph_solver_vv.solve_breadthfirst call for call,
-including the order of calls into the global `random` state that the vendored code reseeds.
+Code-faithful mode mirrors vendored greedy_subgraph_solver_vv.solve_breadthfirst call for call.
+gls_generator is a fast port of the vendored growth that leaves the global `random` state alone;
+vendored_gls_generator is the original, which reseeds it, and Pasqal's own piece solver needs it for an exact match.
 """
 import copy, random, time
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Sequence
 
 import networkx as nx
 
+from .growth import VertexScore, code_start_trap, gls_score, grow_piece, lattice_adjacency
 from .lattice import BLOCKADE_UM, CENTER_TRAP, load_coords, lattice_graph, is_valid_piece
 from .solvers import canonical, first_maximum_set, is_independent, top_maximal_sets
 from .vendored import GreedyMapping, Lattice, greedy_subgraph_solver_vv, weighted_generate_different_mis
@@ -18,6 +20,7 @@ Generator = Callable[[nx.Graph, int], list[Mapping]]             # (current grap
 PieceSolver = Callable[[nx.Graph, Mapping, int], list[frozenset]]  # (piece, mapping, s) -> up to s sets
 Branch = tuple[nx.Graph, list]                                   # (remaining graph, partial solution)
 Pruner = Callable[[list[Branch], int], list[Branch]]             # (next level, solver children) -> kept
+Rank = Callable[[nx.Graph, list[Mapping]], Sequence[float]]      # (current graph, candidate pieces) -> one rank each
 
 
 @dataclass
@@ -38,8 +41,9 @@ def _check_trap_order(coords: dict) -> None:
         raise ValueError("lattice trap ids must be 0..n-1 in insertion order")
 
 
-def gls_generator(coords=None, blockade=BLOCKADE_UM, seed=0) -> Generator:
-    """Vendored obtain_embeddable_subgraphs: grow a piece from every vertex, keep the k largest."""
+def vendored_gls_generator(coords=None, blockade=BLOCKADE_UM, seed=0) -> Generator:
+    """Vendored obtain_embeddable_subgraphs: grow a piece from every vertex, keep the k largest.
+    Slow (it deep-copies the graph for every start vertex); kept as the reference the fast port is tested against."""
     coords = load_coords() if coords is None else coords
     _check_trap_order(coords)
     lattice = Lattice(coords, blockade, seed=seed)
@@ -48,6 +52,24 @@ def gls_generator(coords=None, blockade=BLOCKADE_UM, seed=0) -> Generator:
         maps = [GreedyMapping(g, copy.deepcopy(lattice), [], seed=seed).generate_greedy_ud_subgraph_with(v)
                 for v in g.nodes()]
         return sorted(maps, key=len, reverse=True)[:k]
+    return generate
+
+
+def gls_generator(coords=None, blockade=BLOCKADE_UM, seed=0, score: VertexScore | None = None,
+                  rank: Rank | None = None) -> Generator:
+    """GLS as the vendored code runs it: grow a piece from every vertex, keep the k of highest rank
+    (by default the k largest). `score` replaces the vertex priority used during growth."""
+    coords = load_coords() if coords is None else coords
+    _check_trap_order(coords)
+    adj, avg_degree = lattice_adjacency(coords, blockade)
+    start_trap = code_start_trap(len(adj))
+    make_scorer = score or gls_score(avg_degree)
+
+    def generate(g: nx.Graph, k: int) -> list[Mapping]:
+        scorer = make_scorer(g)
+        maps = [grow_piece(g, v, adj, start_trap, random.Random(seed), scorer) for v in g.nodes()]
+        ranks = [len(m) for m in maps] if rank is None else rank(g, maps)
+        return [maps[i] for i in sorted(range(len(maps)), key=ranks.__getitem__, reverse=True)[:k]]
     return generate
 
 

@@ -1,5 +1,5 @@
 import contextlib, io, itertools, networkx as nx, pytest
-from learned_selection.engine import (run_code_faithful, run_beam, code_prune, gls_generator,
+from learned_selection.engine import (run_code_faithful, run_beam, code_prune, gls_generator, vendored_gls_generator,
                                       pasqal_greedy_piece_solver, exact_piece_solver)
 from learned_selection.instances import erdos_renyi
 from learned_selection.lattice import load_coords
@@ -21,8 +21,17 @@ def test_matches_vendored_breadthfirst_exactly(n, p, seed, ksl):
         best, _, nodes = greedy_subgraph_solver_vv(G, load_coords(), 6.6, weighted_generate_different_mis).solve(
             "breadthfirst", exact_solving_threshold=5, subgraph_quantity=k,
             mis_sample_quantity=s, exploration_threshold=l)
-    r = run_code_faithful(G, k, s, l, solve=pasqal_greedy_piece_solver())
+    # Pasqal's piece solver draws from the global RNG, which only the vendored generator reseeds
+    r = run_beam(G, vendored_gls_generator(), pasqal_greedy_piece_solver(), k, s, code_prune(k, l))
     assert r.solution == frozenset(best) and r.pasqal_runs == len(nodes)
+
+@pytest.mark.parametrize("n,p,seed,ksl", CASES[:54:9] + PRUNING_CASES)
+def test_port_reproduces_vendored_runs(n, p, seed, ksl):
+    k, s, l = ksl
+    G = erdos_renyi(n, p, seed)
+    a = run_code_faithful(G, k, s, l)
+    b = run_beam(G, vendored_gls_generator(), exact_piece_solver, k, s, code_prune(k, l))
+    assert (a.solution, a.quantum_runs, a.pasqal_runs, a.atoms) == (b.solution, b.quantum_runs, b.pasqal_runs, b.atoms)
 
 def test_counts_small_pieces():
     r = run_code_faithful(erdos_renyi(40, 0.75, 0), 4, 2, 10)
@@ -88,20 +97,30 @@ def test_engine_accepts_short_solver_output():
 
 GAP_CASES = list(itertools.product([30, 40], range(6), ["drop0", "drop3711", "shift100"]))
 
-@pytest.mark.parametrize("n,seed,variant", GAP_CASES)
-def test_matches_vendored_on_gapped_and_shifted_int_labels(n, seed, variant):
-    G = erdos_renyi(n, 0.25, seed)
+def _gap_variant(G, variant):
     if variant == "drop0":
         G.remove_node(0)
     elif variant == "drop3711":
         G.remove_nodes_from([3, 7, 11])
     else:
         G = nx.relabel_nodes(G, lambda v: v + 100)
+    return G
+
+@pytest.mark.parametrize("n,seed,variant", GAP_CASES)
+def test_matches_vendored_on_gapped_and_shifted_int_labels(n, seed, variant):
+    G = _gap_variant(erdos_renyi(n, 0.25, seed), variant)
     with contextlib.redirect_stdout(io.StringIO()):
         best, _, nodes = greedy_subgraph_solver_vv(G, load_coords(), 6.6, weighted_generate_different_mis).solve(
             "breadthfirst", exact_solving_threshold=5, subgraph_quantity=4, mis_sample_quantity=2, exploration_threshold=10)
-    r = run_code_faithful(G, 4, 2, 10, solve=pasqal_greedy_piece_solver())
+    r = run_beam(G, vendored_gls_generator(), pasqal_greedy_piece_solver(), 4, 2, code_prune(4, 10))
     assert r.solution == frozenset(best) and r.pasqal_runs == len(nodes)
+
+@pytest.mark.parametrize("n,seed,variant", GAP_CASES[::3])
+def test_port_reproduces_vendored_runs_on_gapped_labels(n, seed, variant):
+    G = _gap_variant(erdos_renyi(n, 0.25, seed), variant)
+    a = run_code_faithful(G, 4, 2, 10)
+    b = run_beam(G, vendored_gls_generator(), exact_piece_solver, 4, 2, code_prune(4, 10))
+    assert (a.solution, a.quantum_runs, a.atoms) == (b.solution, b.quantum_runs, b.atoms)
 
 HASH_SCRIPT = """
 import networkx as nx
