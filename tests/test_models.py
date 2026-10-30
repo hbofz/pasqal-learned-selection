@@ -1,9 +1,9 @@
-import networkx as nx, numpy as np
+import networkx as nx, numpy as np, pytest
 from learned_selection.engine import run_code_bounded
-from learned_selection.features import PIECE_FEATURES, VERTEX_FEATURES
+from learned_selection.features import GRAPH_FEATURES, PIECE_FEATURES, VERTEX_FEATURES, graph_features
 from learned_selection.instances import erdos_renyi
-from learned_selection.models import (LinearModel, fit_lgbm, fit_linear, h2_score, h4_rank, load, relevance,
-                                      save, topk_regret)
+from learned_selection.models import (LinearModel, fit_lgbm, fit_linear, fit_value_linear, h2_score, h4_rank,
+                                      linear_value, load, relevance, save, topk_regret)
 from learned_selection.solvers import is_independent
 
 def _planted(rng, groups=50, size=30, d=5):
@@ -60,3 +60,23 @@ def test_save_load_roundtrip(tmp_path):
     for name, m in models.items():
         save(m, tmp_path / name)
         assert np.allclose(load(tmp_path / name).predict(X), m.predict(X), rtol=0, atol=1e-12)
+
+
+def test_value_model_fits_an_intercept_and_old_files_still_load(tmp_path):
+    X = np.random.default_rng(0).standard_normal((50, 10))
+    y = X @ np.arange(10) + 3.0
+    m = fit_value_linear(X, y, ridge=1e-9)
+    assert np.allclose(m.predict(X), y, atol=1e-5)
+    save(m, tmp_path / "v.json")
+    assert np.allclose(load(tmp_path / "v.json").predict(X), m.predict(X))
+    assert load("models/lin-h2.json").b == 0.0
+
+def test_graph_features_on_a_star_and_on_nothing():
+    f = dict(zip(GRAPH_FEATURES, graph_features(nx.star_graph(4))))
+    assert f["n"] == 5 and f["edges"] == 4 and f["caro_wei"] == pytest.approx(4 * 0.5 + 0.2) and f["isolated"] == 0
+    assert np.isfinite(graph_features(nx.empty_graph(0))).all()
+
+def test_linear_value_hook_scores_empty_graphs_zero():
+    m = LinearModel(np.zeros(10), np.ones(10), np.ones(10), 2.5)
+    v = linear_value(m)([nx.empty_graph(0), nx.empty_graph(3)])
+    assert v[0] == 0.0 and v[1] == pytest.approx(11.5) and linear_value(m)([]) == []
