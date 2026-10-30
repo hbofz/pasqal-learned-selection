@@ -1,6 +1,10 @@
 """Pasqal's GLS code, imported unchanged from vendor/pasqal_docking (see SOURCE.md there)."""
-import sys, types
+import os, sys, types
 from pathlib import Path
+
+# Notebook runtimes set an inline plotting backend that this project's environment lacks.
+if os.environ.get("MPLBACKEND", "").startswith("module://matplotlib_inline"):
+    os.environ["MPLBACKEND"] = "Agg"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "vendor" / "pasqal_docking"))
 # classic_MIS_solvers imports cplex at top level; we never call its cplex solver.

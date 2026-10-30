@@ -101,3 +101,12 @@ def test_shard_splits_instances_disjointly():
     assert shard(xs, None) == xs
     with pytest.raises(ValueError):
         shard(xs, "3/3")
+
+
+def test_a_gnn_file_with_the_wrong_head_is_refused(tmp_path):
+    from learned_selection.bench import method_runner
+    from learned_selection.gnn import GNN, save_gnn
+    d, p = len(VERTEX_FEATURES), len(PIECE_FEATURES)
+    save_gnn(GNN("gin", "vertex", np.zeros(d), np.ones(d), np.zeros(p), np.ones(p)), tmp_path / "gin-h4.pt")
+    with pytest.raises(ValueError, match=r"gin-h4\.pt.*'vertex'.*'piece'"):
+        method_runner("gin-h4", tmp_path)

@@ -112,6 +112,9 @@ def _hook(kind: str, hook: str, d: Path):
     model = _model(d / f"{kind}-{hook}{KIND_EXT[kind]}")
     if kind in GNN_KINDS:
         from . import gnn     # torch is already loaded: the model above is a .pt file
+        head = {"h2": "vertex", "h4": "piece", "h5": "value"}[hook]
+        if model.head != head:
+            raise ValueError(f"{kind}-{hook}.pt has a {model.head!r} head, but hook {hook} needs a {head!r} head")
         return keyword, {"h2": gnn.gnn_score, "h4": gnn.gnn_rank, "h5": gnn.gnn_value}[hook](model)
     return keyword, {"h2": h2_score, "h4": h4_rank, "h5": linear_value}[hook](model)
 

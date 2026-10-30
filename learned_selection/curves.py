@@ -18,7 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .bench import BEAM_METHODS, ORACLE_METHODS, gap_pct, parse_method
+from .bench import BEAM_METHODS, GNN_KINDS, ORACLE_METHODS, gap_pct, parse_method
 from .instances import HELD_OUT_SETTINGS, TEST_SEEDS, TEST_SIZES, TRAIN_SETTINGS, VAL_SEEDS
 
 LEARNED = [m for m in BEAM_METHODS if not m.startswith("gls") and m not in ORACLE_METHODS]
@@ -165,8 +165,9 @@ def curve_gain(rows, method, baseline="gls", runs_key="quantum_runs", reps=2000,
     return out
 
 
-def headline(rows, runs_key, reps=2000, seed=0, seeds=TEST_SEEDS, baseline="gls") -> list[dict]:
-    """Each learned method at widths (4, 2, 10) with 1 restart against `baseline` (which is skipped as a method),
+def headline(rows, runs_key, reps=2000, seed=0, seeds=TEST_SEEDS, baseline="gls",
+             methods=None) -> list[dict]:
+    """Each learned method (or each of `methods`) at widths (4, 2, 10) with 1 restart against `baseline` (which is skipped as a method),
     pooled over cells on `seeds` only. On
     test seeds there are two pools, the training settings and the held-out settings, at the test sizes; settings
     at BIG_N are left to the per-setting tables. On VAL_SEEDS the one pool is the validation grid: the training
@@ -177,7 +178,7 @@ def headline(rows, runs_key, reps=2000, seed=0, seeds=TEST_SEEDS, baseline="gls"
     out = []
     for pool, settings, sizes in pools:
         cells = [(f, json.dumps(p, sort_keys=True), n) for f, p in settings for n in sizes]
-        for method in (m for m in LEARNED if m != baseline):
+        for method in (m for m in (LEARNED if methods is None else methods) if m != baseline):
             cfg = (method, *HEADLINE_CONFIG)
             prepared = [_prepare(tables[c], cfg, baseline, runs_key) for c in cells if cfg in tables.get(c, {})]
             if prepared:
@@ -238,6 +239,7 @@ COLORS = {"gls": "#2a78d6", "lin": "#eb6834", "lgb": "#1baf7a", "cma": "#eda100"
 MARKERS = {"h2": "o", "h4": "s", "h2h4": "^", "h5": "D", "h2h4h5": "P"}
 SURFACE, INK, INK_2, GRID, AXIS = "#fcfcfb", "#0b0b0b", "#52514e", "#e1e0d9", "#c3c2b7"
 RUN_LABELS = {"quantum_runs": "quantum runs", "pasqal_runs": "piece-solver runs"}
+GNN_COLORS = {COLORS[k] for k in GNN_KINDS}
 
 
 def _style(method: str) -> tuple[str, str, bool]:
@@ -278,11 +280,12 @@ def plot(summary, out_dir, runs_key="quantum_runs", methods=None) -> list[Path]:
             pts.sort(key=lambda r: r[runs_key])
             color, marker, mixed = _style(method)
             single = restarts == 1
+            hollow = not single or color in GNN_COLORS    # GNN kinds are hollow, so lin and gin differ by more than hue
             x, y = [r[runs_key] for r in pts], [r["gap"] for r in pts]
             ax.errorbar(x, y, yerr=[[r["gap"] - r["gap_lo"] for r in pts], [r["gap_hi"] - r["gap"] for r in pts]],
                         fmt="none", ecolor=color, elinewidth=0.9, alpha=0.5)
             ax.plot(x, y, color=color, lw=1.6, ls=("-." if mixed else "-") if single else "--", marker=marker, ms=6,
-                    mfc=color if single else SURFACE, mec=SURFACE if single else color, mew=1.2 if single else 1.4,
+                    mfc=SURFACE if hollow else color, mec=color if hollow else SURFACE, mew=1.4 if hollow else 1.2,
                     label=method if single else f"{method}, {restarts} restarts")
         ax.set_xscale("log")
         ax.grid(True, which="major", color=GRID, lw=0.6)
@@ -316,12 +319,12 @@ def _ci(x, lo, hi, fmt=".2f") -> str:
     return "-" if x is None else f"{x:{fmt}} [{_num(lo, fmt)}, {_num(hi, fmt)}]"
 
 
-def _print_headline(rows, runs_key, seeds, baseline) -> None:
-    print(f"\nHeadline, {RUN_LABELS[runs_key]}: learned methods at widths (4, 2, 10), 1 restart, against {baseline}; "
+def _print_headline(rows, runs_key, seeds, baseline, methods=None) -> None:
+    print(f"\nHeadline, {RUN_LABELS[runs_key]}: {"learned" if methods is None else "oracle"} methods at widths (4, 2, 10), 1 restart, against {baseline}; "
           "d_gap is the mean over defined cells, run_ratio the geometric mean")
     print("  def: defined cells; beat: undefined cells that beat the envelope; exp: undefined cells outside it on the "
           "expensive side; none: resamples with no defined cell")
-    table = headline(rows, runs_key, seeds=seeds, baseline=baseline)
+    table = headline(rows, runs_key, seeds=seeds, baseline=baseline, methods=methods)
     if not table:
         print("  no headline cells on these seeds in these files")
         return
@@ -374,6 +377,10 @@ def main(argv=None) -> None:
     for baseline in baselines:
         for runs_key in RUN_KEYS:
             _print_headline(rows, runs_key, seeds, baseline)
+    if a.split == "val":
+        print("\noracle references (exact value pruning, not a structure-track method)")
+        for runs_key in RUN_KEYS:
+            _print_headline(rows, runs_key, seeds, "gls", ORACLE_METHODS)
     tables = _tables(rows)
     code_finished = {}
     for r in rows:

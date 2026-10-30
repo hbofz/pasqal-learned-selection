@@ -220,3 +220,9 @@ def test_exact_value_prune_changes_some_runs():
     runs = [(run_code_bounded(G, 4, 2, 10), run_code_bounded(G, 4, 2, 10, value=exact))
             for G in (erdos_renyi(60, 0.1, s) for s in range(4))]
     assert any((a.solution, a.quantum_runs) != (b.solution, b.quantum_runs) for a, b in runs)
+
+
+def test_value_hook_returning_too_few_scores_fails_loudly():
+    level = [(nx.empty_graph(2), [0] * i) for i in range(5)]
+    with pytest.raises(ValueError):
+        code_prune(2, 3, value=lambda graphs: [0.0] * (len(graphs) - 1))(level, 5)

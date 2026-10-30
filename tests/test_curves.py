@@ -96,3 +96,15 @@ def test_plot_draws_composed_methods(tmp_path):
             for m in ("gls", "lin-h2h4", "gin-h2h4h5", "lin-h2h4+gin-h5", "sage-h5") for k, r, g in ((2, 10, 9.0), (4, 30, 7.0))]
     assert len(plot(rows, tmp_path)) == 1
     assert len(plot(rows, tmp_path / "some", methods=["gls", "sage-h5"])) == 1
+
+
+def test_cli_prints_oracle_references_on_val_only(tmp_path, capsys):
+    path = tmp_path / "rows.jsonl"
+    for split, seeds, n in (("val", VAL_SEEDS, 100), ("test", TEST_SEEDS, TEST_SIZES[0])):
+        rows = [r for m in ("exact-h5", "lin-h2h4+exact-h5") for r in _rows(FA, PA, n, seeds, 10 ** 1.5, 6.0, method=m)]
+        path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        main([str(path), "--out", str(tmp_path / "plots"), "--split", split])
+        out = capsys.readouterr().out
+        assert ("oracle references (exact value pruning, not a structure-track method)" in out) == (split == "val")
+        if split == "val":
+            assert out.split("oracle references")[1].count("exact-h5") >= 2 and "-1.58" in out

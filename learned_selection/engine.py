@@ -104,7 +104,7 @@ def code_prune(k: int, l: int, count_small: bool = False, value: Value | None = 
         if counter > l:
             counter = 0
             if value is not None and len(level) > k:
-                keys = [len(sol) + v for (_, sol), v in zip(level, value([g for g, _ in level]))]
+                keys = [len(sol) + v for (_, sol), v in zip(level, value([g for g, _ in level]), strict=True)]
                 return [level[i] for i in sorted(range(len(level)), key=keys.__getitem__, reverse=True)[:k]]
             return sorted(level, key=lambda b: len(b[1]), reverse=True)[:k]
         return level
