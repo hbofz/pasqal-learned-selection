@@ -64,3 +64,16 @@ def test_label_graphs_defers_big_states_and_refuses_test_seeds():
     assert r["states"] and all(rec["n"] <= 30 for rec in r["states"])
     with pytest.raises(ValueError, match="test seed"):
         label_graphs("er", {"p": 0.25}, 40, TEST_SEEDS[0])
+
+def test_hook_counts_read_rows_from_the_records(capsys):
+    from learned_selection.graphdata import hook_counts, summarize
+    a = dict(n=10, member=np.zeros(10, np.int8), q=np.zeros(3, np.int64), pieces=[None] * 3, first=True, children=[],
+             setting="s", instance_n=10)
+    b = dict(n=7, member=np.zeros(7, np.int8), q=None, pieces=[None] * 2, first=False, children=[],
+             setting="s", instance_n=10)
+    c = dict(n=5, member=None, q=None, pieces=[None], first=False, children=[], setting="s", instance_n=10)
+    assert hook_counts([a, b, c]) == {"h2": dict(states=2, rows=17), "h4": dict(states=1, rows=3)}
+    meta = dict(instances=1, dropped=[], settings=[dict(setting="s", n=10, instances=1)], label_cpu_s=0.0)
+    summarize([meta], [a, b, c])
+    out = capsys.readouterr().out
+    assert "h2: 2 states labelled (17 rows)" in out and "h4: 1 states labelled (3 rows)" in out

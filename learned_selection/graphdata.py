@@ -92,8 +92,16 @@ def _defer_job(args: tuple) -> tuple[dict, float]:
     return rec, time.process_time() - start
 
 
+def hook_counts(states: list[dict]) -> dict:
+    """Per hook, the labelled states and their rows, read from the records: h2 has one row per vertex of a state
+    with a proven membership, h4 one row per candidate of a state with proven Q*."""
+    return {hook: dict(states=sum(r[key] is not None for r in states),
+                       rows=sum(r[size] if size == "n" else len(r[size]) for r in states if r[key] is not None))
+            for hook, key, size in zip(HOOKS, ("member", "q"), ("n", "pieces"))}
+
+
 def summarize(metas: list[dict], states: list[dict]) -> None:
-    labelled = {hook: sum(r[key] is not None for r in states) for hook, key in zip(HOOKS, ("member", "q"))}
+    counts = hook_counts(states)
     lost = Counter()
     for m in metas:
         for d in m["dropped"]:
@@ -106,8 +114,10 @@ def summarize(metas: list[dict], states: list[dict]) -> None:
                     for hook, key in zip(HOOKS, ("member", "q")) if r[key] is not None)
     print(f"{sum(m['instances'] for m in metas)} instances; {len(states)} states")
     for hook in HOOKS:
-        total = labelled[hook] + lost[hook]
-        print(f"{hook}: {labelled[hook]} states labelled, {lost[hook]} dropped ({lost[hook] / total if total else 0:.1%})")
+        c = counts[hook]
+        total = c["states"] + lost[hook]
+        print(f"{hook}: {c['states']} states labelled ({c['rows']} rows), {lost[hook]} dropped "
+              f"({lost[hook] / total if total else 0:.1%})")
     print(f"children: {sum(len(r['children']) for r in states)}")
     print(f"{'setting':32}{'n':>5}{'instances':>11}{'h2 first':>10}{'h4 first':>10}")
     for (name, n), total in per_setting.items():
@@ -161,6 +171,7 @@ def main(argv=None) -> None:
 
     per_setting = Counter((_setting_name(f, p), n) for f, p, n, _ in jobs)
     meta = dict(split=a.split, shard=a.shard, instances=len(jobs), states=len(states),
+                counts=hook_counts(states),
                 settings=[dict(setting=s, n=n, instances=c) for (s, n), c in per_setting.items()],
                 deferred_states=len(deferred),
                 dropped=[dict(setting=s, n=n, hook=h, first=bool(f), count=c) for (s, n, h, f), c in dropped.items()],
