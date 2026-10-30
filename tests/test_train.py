@@ -54,3 +54,10 @@ def test_value_selection_prefers_lower_regret_then_lower_child_error():
     a, b = dict(prune_regret=0.0, child_mae=0.3), dict(prune_regret=0.0, child_mae=0.5)
     assert _better(a, b) and not _better(b, a)
     assert _better(dict(prune_regret=0.0, child_mae=9.0), dict(prune_regret=0.1, child_mae=0.1))
+
+def test_load_states_refuses_selection_seeds(tmp_path):
+    import pickle
+    path = tmp_path / "x.pkl"
+    path.write_bytes(pickle.dumps({"meta": {}, "states": [dict(setting="er(p=0.25)", seed=105)]}))
+    with pytest.raises(ValueError):
+        load_states([path])

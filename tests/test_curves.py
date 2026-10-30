@@ -1,6 +1,8 @@
 import json, pytest
-from learned_selection.curves import curve_gain, envelope, gap_at, headline, main, plot, runs_at
-from learned_selection.instances import HELD_OUT_SETTINGS, TEST_SEEDS, TEST_SIZES, TRAIN_SETTINGS, VAL_SEEDS
+from learned_selection.curves import (_print_settings, _stats, _tables, curve_gain, envelope, gap_at, headline, main,
+                                      plot, runs_at, summarize)
+from learned_selection.instances import (HELD_OUT_SETTINGS, SEL_SEEDS, TEST_SEEDS, TEST_SIZES, TRAIN_SETTINGS,
+                                         VAL_SEEDS)
 
 # The GLS envelope in these rows runs from (10 runs, 10%) to (100 runs, 5%). At 10**1.5 runs it reads 7.5%, and it
 # reaches 6% at 10**1.8 runs.
@@ -108,3 +110,57 @@ def test_cli_prints_oracle_references_on_val_only(tmp_path, capsys):
         assert ("oracle references (exact value pruning, not a structure-track method)" in out) == (split == "val")
         if split == "val":
             assert out.split("oracle references")[1].count("exact-h5") >= 2 and "-1.58" in out
+
+
+def test_headline_uses_a_methods_own_config():
+    # the method has records at (4, 2, 100) only: with its config it is read, without it there is no row
+    rows = [dict(r, l=100) if r["method"] == "m" else r
+            for r in _rows(FA, PA, 100, SEL_SEEDS, 10 ** 1.5, 6.0, method="m")]
+    assert headline(rows, "quantum_runs", seeds=SEL_SEEDS, methods=["m"]) == []
+    (h,) = headline(rows, "quantum_runs", seeds=SEL_SEEDS, methods=["m"], configs={"m": (4, 2, 100, 1)})
+    assert h["pool"] == "selection" and h["d_gap"] == pytest.approx(-1.5)
+    assert h["d_clamp"] == pytest.approx(-1.5) and h["instances"] == len(SEL_SEEDS)
+
+
+def test_clamped_d_gap_holds_the_envelope_flat_past_its_ends():
+    # baseline points (10 runs, 10%) and (100 runs, 5%)
+    assert _stats([1000.0, 10.0, 100.0], [6.0, 10.0, 5.0])[2] == pytest.approx(1.0)     # dearer: 6 - 5, d_gap undefined
+    assert _stats([1.0, 10.0, 100.0], [6.0, 10.0, 5.0])[2] == pytest.approx(-4.0)       # cheaper: 6 - 10
+    assert _stats([10 ** 1.5, 10.0, 100.0], [6.0, 10.0, 5.0])[2] == pytest.approx(-1.5)  # inside: the same as d_gap
+    assert _stats([0.0, 10.0, 100.0], [6.0, 10.0, 5.0])[2] == pytest.approx(-4.0)       # no runs: the first point
+    assert _stats([5.0], [6.0])[2] is None                                               # no envelope
+
+
+def test_clamped_d_gap_is_defined_where_d_gap_is_not():
+    rows = _rows(FA, PA, 100, TEST_SEEDS[:3], 1000, 6.0)
+    (h,) = headline(rows, "quantum_runs", reps=50)
+    assert h["d_gap"] is None and h["d_clamp"] == pytest.approx(1.0) and h["d_clamp_lo"] == pytest.approx(1.0)
+
+
+def test_plot_and_tables_take_new_kinds_and_search_names(tmp_path, capsys):
+    search, dual = "lin-h2+gin-h4+sage-h5+mcts", "dlin-h2h4+dsage-h5"
+    rows = (_rows(FA, PA, 100, TEST_SEEDS[:3], 10 ** 1.5, 6.0, method=dual)
+            + [r for r in _rows(FA, PA, 100, TEST_SEEDS[:3], 10 ** 1.5, 4.0, method=search) if r["method"] == search])
+    for r in rows:
+        if r["method"] == search:
+            r["l"] = 100
+    summary = summarize(rows, reps=50)
+    assert len(plot(summary, tmp_path)) == 1
+    configs = {search: (4, 2, 100, 1)}
+    _print_settings(_tables(rows), summary, "gls", "quantum_runs", sorted(_tables(rows)), configs)
+    out = capsys.readouterr().out
+    assert dual in out and search in out
+    assert [line for line in out.splitlines() if search in line][0].split()[1] == "3"
+    (h,) = headline(rows, "quantum_runs", reps=50, methods=[search], configs=configs)
+    assert h["method"] == search and h["d_gap"] == pytest.approx(-3.5)
+
+
+def test_cli_sel_split_reads_each_method_at_its_config(tmp_path, capsys):
+    rows = [dict(r, l=100) if r["method"] == "lin-h4" else r for r in
+            _rows(FA, PA, 100, SEL_SEEDS, 10 ** 1.5, 6.0, method="lin-h4") + _rows(FA, PA, 100, TEST_SEEDS[:3], 10 ** 1.5, 9.0)]
+    path = tmp_path / "sel.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    main([str(path), "--out", str(tmp_path / "plots"), "--split", "sel", "--methods", "lin-h4",
+          "--config", "lin-h4=4,2,100"])
+    out = capsys.readouterr().out
+    assert "selection" in out and "-1.58 [-1.58, -1.58]" in out and "9.00" not in out

@@ -4,7 +4,8 @@ piece sizes, and so run counts, so one width alone can favour either side.
     uv run python -m learned_selection.curves results/eval/*.jsonl --out results/plots
     uv run python -m learned_selection.curves results/eval/val.jsonl --out results/plots-val --split val
 
-Only rows on the split's seeds are read: test seeds by default, validation seeds with --split val.
+Only rows on the split's seeds are read: test seeds by default, validation seeds with --split val, selection seeds
+with --split sel.
 
 Against GLS's lower envelope (the best gap any GLS configuration reaches for its runs):
 - d_gap is a method's mean gap minus the envelope's gap at the method's mean runs. Below 0 is better.
@@ -12,18 +13,28 @@ Against GLS's lower envelope (the best gap any GLS configuration reaches for its
   better.
 Both are None where the method falls outside the envelope's range, and run_ratio is None where the method makes no
 runs. Such cells are counted by the side the method falls on.
+- d_clamp is d_gap with the envelope held flat beyond its ends, so it is defined wherever there is an envelope.
 """
 import argparse, json, math
 from pathlib import Path
 
 import numpy as np
 
-from .bench import BEAM_METHODS, GNN_KINDS, ORACLE_METHODS, gap_pct, parse_method
-from .instances import HELD_OUT_SETTINGS, TEST_SEEDS, TEST_SIZES, TRAIN_SETTINGS, VAL_SEEDS
+from .bench import BEAM_METHODS, GNN_KINDS, ORACLE_METHODS, gap_pct, known_method, parse_method, search_of, track_of
+from .instances import HELD_OUT_SETTINGS, SEL_SEEDS, SEL_SIZES, TEST_SEEDS, TEST_SIZES, TRAIN_SETTINGS, VAL_SEEDS
 
-LEARNED = [m for m in BEAM_METHODS if not m.startswith("gls") and m not in ORACLE_METHODS]
 HEADLINE_CONFIG = (4, 2, 10, 1)   # k, s, l, restarts
 RUN_KEYS = ("quantum_runs", "pasqal_runs")
+
+
+def _rank(method: str) -> tuple:
+    return BEAM_METHODS.index(method) if method in BEAM_METHODS else len(BEAM_METHODS), method
+
+
+def learned_in(rows) -> list[str]:
+    """The known methods in `rows` that are neither GLS, oracle nor classical, in BEAM_METHODS order, then sorted."""
+    return sorted((m for m in {r["method"] for r in rows}
+                   if known_method(m) and not m.startswith("gls") and track_of(m) == "structure"), key=_rank)
 
 
 def _cell(r) -> tuple:
@@ -108,17 +119,20 @@ def _prepare(table, cfg, baseline, runs_key):
 
 
 def _stats(runs, gaps):
-    """((d_gap, side), (run_ratio, side)) from per-config means, the method first and the baseline configs after
-    it. An undefined statistic is None, and its side says where the method falls: "beats" for fewer runs than the
-    envelope's cheapest point (d_gap), or for a lower gap than its best point or no runs at all (run_ratio);
-    "expensive" for the other direction. With no envelope both are None and have no side."""
+    """((d_gap, side), (run_ratio, side), d_clamp) from per-config means, the method first and the baseline configs
+    after it. An undefined statistic is None, and its side says where the method falls: "beats" for fewer runs than
+    the envelope's cheapest point (d_gap), or for a lower gap than its best point or no runs at all (run_ratio);
+    "expensive" for the other direction. With no envelope both are None and have no side. d_clamp is the gap minus
+    the envelope's, held flat beyond its ends (the first point's for no runs), and None only with no envelope."""
     env = envelope((r, g) for r, g in zip(runs[1:], gaps[1:]) if r > 0)   # 0 runs has no place on a log scale
     if not env:
-        return (None, None), (None, None)
+        return (None, None), (None, None), None
     g = gap_at(env, runs[0]) if runs[0] > 0 else None
+    clamp = gaps[0] - (gap_at(env, min(max(runs[0], env[0][0]), env[-1][0])) if runs[0] > 0 else env[0][1])
     r = runs_at(env, gaps[0]) if runs[0] > 0 else None    # a method with no runs has no ratio, not a ratio of 0
     return ((gaps[0] - g, None) if g is not None else (None, "expensive" if runs[0] > env[-1][0] else "beats"),
-            (runs[0] / r, None) if r is not None else (None, "expensive" if gaps[0] > env[0][1] else "beats"))
+            (runs[0] / r, None) if r is not None else (None, "expensive" if gaps[0] > env[0][1] else "beats"),
+            clamp)
 
 
 def _geomean(v):
@@ -127,28 +141,32 @@ def _geomean(v):
 
 def _gain(prepared, reps, seed) -> dict:
     """d_gap averaged and run_ratio geometrically averaged over the cells where each is defined, each with a 95%
-    bootstrap CI. A resample draws instances with replacement within each cell and averages over the cells defined
-    in it; a resample with no defined cell counts in *_none. *_cells counts the defined cells, and *_beats and
-    *_expensive the undefined ones by the side of the envelope the method falls on."""
+    bootstrap CI, and d_clamp averaged the same way over the cells that have an envelope. A resample draws instances
+    with replacement within each cell and averages over the cells defined in it; a resample with no defined cell
+    counts in *_none. *_cells counts the defined cells, and *_beats and *_expensive the undefined ones by the side of
+    the envelope the method falls on."""
     rng = np.random.default_rng(seed)
     point, boot = [], []
     for R, G in prepared:
         n = R.shape[1]
-        point.append(_stats(R.mean(1).tolist(), G.mean(1).tolist()) if n else ((None, None), (None, None)))
+        point.append(_stats(R.mean(1).tolist(), G.mean(1).tolist()) if n else ((None, None), (None, None), None))
         if n:
             idx = rng.integers(0, n, (reps, n))
             Rb, Gb = R[:, idx].mean(2).T.tolist(), G[:, idx].mean(2).T.tolist()
             boot.append([_stats(a, b) for a, b in zip(Rb, Gb)])
     out = {}
-    for j, (name, average) in enumerate((("d_gap", lambda v: float(np.mean(v))), ("run_ratio", _geomean))):
-        values = [p[j][0] for p in point if p[j][0] is not None]
-        resamples = ([cell[b][j][0] for cell in boot if cell[b][j][0] is not None] for b in range(reps))
+    mean = lambda v: float(np.mean(v))
+    for j, (name, average) in enumerate((("d_gap", mean), ("run_ratio", _geomean), ("d_clamp", mean))):
+        value = (lambda s: s[2]) if j == 2 else (lambda s, j=j: s[j][0])
+        values = [value(p) for p in point if value(p) is not None]
+        resamples = ([value(cell[b]) for cell in boot if value(cell[b]) is not None] for b in range(reps))
         stats = [average(v) for v in resamples if v]
         lo, hi = np.percentile(stats, [2.5, 97.5]).tolist() if stats else (None, None)
-        sides = [p[j][1] for p in point]
-        out.update({name: average(values) if values else None, f"{name}_lo": lo, f"{name}_hi": hi,
-                    f"{name}_none": reps - len(stats), f"{name}_cells": len(values),
-                    f"{name}_beats": sides.count("beats"), f"{name}_expensive": sides.count("expensive")})
+        out.update({name: average(values) if values else None, f"{name}_lo": lo, f"{name}_hi": hi})
+        if j < 2:
+            sides = [p[j][1] for p in point]
+            out.update({f"{name}_none": reps - len(stats), f"{name}_cells": len(values),
+                        f"{name}_beats": sides.count("beats"), f"{name}_expensive": sides.count("expensive")})
     return out
 
 
@@ -165,21 +183,22 @@ def curve_gain(rows, method, baseline="gls", runs_key="quantum_runs", reps=2000,
     return out
 
 
-def headline(rows, runs_key, reps=2000, seed=0, seeds=TEST_SEEDS, baseline="gls",
-             methods=None) -> list[dict]:
-    """Each learned method (or each of `methods`) at widths (4, 2, 10) with 1 restart against `baseline` (which is skipped as a method),
-    pooled over cells on `seeds` only. On
-    test seeds there are two pools, the training settings and the held-out settings, at the test sizes; settings
-    at BIG_N are left to the per-setting tables. On VAL_SEEDS the one pool is the validation grid: the training
-    settings at n=100."""
+def headline(rows, runs_key, reps=2000, seed=0, seeds=TEST_SEEDS, baseline="gls", methods=None,
+             configs: dict[str, tuple] | None = None) -> list[dict]:
+    """Each learned method in `rows` (or each of `methods`) against `baseline` (which is skipped as a method), at its
+    own (k, s, l, restarts) in `configs` (default HEADLINE_CONFIG), pooled over cells on `seeds` only. On test seeds
+    there are two pools, the training settings and the held-out settings, at the test sizes; settings at BIG_N are
+    left to the per-setting tables. On VAL_SEEDS the one pool is the validation grid: the training settings at
+    n=100. On SEL_SEEDS it is the selection grid: the training settings at SEL_SIZES."""
     tables = _tables([r for r in rows if r["seed"] in seeds])
     pools = ([("validation", TRAIN_SETTINGS, (100,))] if seeds == VAL_SEEDS else
+             [("selection", TRAIN_SETTINGS, SEL_SIZES)] if seeds == SEL_SEEDS else
              [("training", TRAIN_SETTINGS, TEST_SIZES), ("held-out", HELD_OUT_SETTINGS, TEST_SIZES)])
     out = []
     for pool, settings, sizes in pools:
         cells = [(f, json.dumps(p, sort_keys=True), n) for f, p in settings for n in sizes]
-        for method in (m for m in (LEARNED if methods is None else methods) if m != baseline):
-            cfg = (method, *HEADLINE_CONFIG)
+        for method in (m for m in (learned_in(rows) if methods is None else methods) if m != baseline):
+            cfg = (method, *(configs or {}).get(method, HEADLINE_CONFIG))
             prepared = [_prepare(tables[c], cfg, baseline, runs_key) for c in cells if cfg in tables.get(c, {})]
             if prepared:
                 out.append(dict(pool=pool, method=method, baseline=baseline, runs_key=runs_key, cells=len(prepared),
@@ -235,23 +254,26 @@ def paired(rows, method, baseline="gls", reps=2000, seed=0, seeds=TEST_SEEDS) ->
 # so colour is never the only code. Orange and red are close, so lin and gin lean on marker and legend.
 COLORS = {"gls": "#2a78d6", "lin": "#eb6834", "lgb": "#1baf7a", "cma": "#eda100", "gin": "#e34948",
           "sage": "#6250d6", "gat": "#008300", "gls-screen": "#e87ba4", "gls-paper": "#a3a29a",
-          "gls-code": "#6e6d68", "exact": "#0b0b0b"}
-MARKERS = {"h2": "o", "h4": "s", "h2h4": "^", "h5": "D", "h2h4h5": "P"}
+          "gls-code": "#6e6d68", "exact": "#0b0b0b", "az": "#8a5a2b"}
+COLORS.update({"d" + k: COLORS[k] for k in ("lin", "gin", "sage", "gat")})   # told apart by their dotted line
+MARKERS = {"h2": "o", "h4": "s", "h2h4": "^", "h5": "D", "h2h4h5": "P", "mcts": "*"}
 SURFACE, INK, INK_2, GRID, AXIS = "#fcfcfb", "#0b0b0b", "#52514e", "#e1e0d9", "#c3c2b7"
 RUN_LABELS = {"quantum_runs": "quantum runs", "pasqal_runs": "piece-solver runs"}
 GNN_COLORS = {COLORS[k] for k in GNN_KINDS}
 
 
-def _style(method: str) -> tuple[str, str, bool]:
-    """(colour, marker, mixes kinds) of a beam method. A composed name takes the colour of the kind that provides
-    its last hook and the marker of its joined hook set."""
+def _style(method: str) -> tuple[str, str, str]:
+    """(colour, marker, line style) of a beam method. A composed name takes the colour of the kind that provides
+    its last hook and the marker of its joined hook set (a star for tree search). Its line is dash-dot when it mixes
+    kinds, dotted when that kind is a dlin, dgin, dsage or dgat, and solid otherwise."""
     if method.startswith("gls"):
-        return COLORS[method], "o", False
+        return COLORS[method], "o", "-"
     if method.startswith("cma-"):
-        return COLORS["cma"], MARKERS["h2"], False
+        return COLORS["cma"], MARKERS["h2"], "-"
     parts = parse_method(method)
     kind = max(parts, key=lambda p: p[1])[0]
-    return COLORS[kind], MARKERS["".join(sorted({h for _, h in parts}))], len({k for k, _ in parts}) > 1
+    marker = MARKERS["mcts" if search_of(method) is not None else "".join(sorted({h for _, h in parts}))]
+    return COLORS[kind], marker, "-." if len({k for k, _ in parts}) > 1 else ":" if kind[0] == "d" else "-"
 
 
 def plot(summary, out_dir, runs_key="quantum_runs", methods=None) -> list[Path]:
@@ -266,8 +288,8 @@ def plot(summary, out_dir, runs_key="quantum_runs", methods=None) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     cells = {}
     for r in summary:
-        if (r["method"] in BEAM_METHODS and (methods is None or r["method"] in methods)
-                and r["gap"] is not None and r[runs_key]):
+        if (known_method(r["method"]) and track_of(r["method"]) != "classical"
+                and (methods is None or r["method"] in methods) and r["gap"] is not None and r[runs_key]):
             cells.setdefault((r["family"], json.dumps(r["params"], sort_keys=True), r["n"]), []).append(r)
     paths = []
     for (family, params, n), recs in cells.items():
@@ -276,15 +298,15 @@ def plot(summary, out_dir, runs_key="quantum_runs", methods=None) -> list[Path]:
             series.setdefault((r["method"], r["restarts"]), []).append(r)
         fig, ax = plt.subplots(figsize=(9, 5.2), dpi=150, facecolor=SURFACE)
         ax.set_facecolor(SURFACE)
-        for (method, restarts), pts in sorted(series.items(), key=lambda kv: (BEAM_METHODS.index(kv[0][0]), kv[0][1])):
+        for (method, restarts), pts in sorted(series.items(), key=lambda kv: (_rank(kv[0][0]), kv[0][1])):
             pts.sort(key=lambda r: r[runs_key])
-            color, marker, mixed = _style(method)
+            color, marker, style = _style(method)
             single = restarts == 1
             hollow = not single or color in GNN_COLORS    # GNN kinds are hollow, so lin and gin differ by more than hue
             x, y = [r[runs_key] for r in pts], [r["gap"] for r in pts]
             ax.errorbar(x, y, yerr=[[r["gap"] - r["gap_lo"] for r in pts], [r["gap_hi"] - r["gap"] for r in pts]],
                         fmt="none", ecolor=color, elinewidth=0.9, alpha=0.5)
-            ax.plot(x, y, color=color, lw=1.6, ls=("-." if mixed else "-") if single else "--", marker=marker, ms=6,
+            ax.plot(x, y, color=color, lw=1.6, ls=style if single else "--", marker=marker, ms=6,
                     mfc=SURFACE if hollow else color, mec=color if hollow else SURFACE, mew=1.4 if hollow else 1.2,
                     label=method if single else f"{method}, {restarts} restarts")
         ax.set_xscale("log")
@@ -319,38 +341,42 @@ def _ci(x, lo, hi, fmt=".2f") -> str:
     return "-" if x is None else f"{x:{fmt}} [{_num(lo, fmt)}, {_num(hi, fmt)}]"
 
 
-def _print_headline(rows, runs_key, seeds, baseline, methods=None) -> None:
-    print(f"\nHeadline, {RUN_LABELS[runs_key]}: {"learned" if methods is None else "oracle"} methods at widths (4, 2, 10), 1 restart, against {baseline}; "
-          "d_gap is the mean over defined cells, run_ratio the geometric mean")
+def _print_headline(rows, runs_key, seeds, baseline, methods=None, word="learned", configs=None) -> None:
+    print(f"\nHeadline, {RUN_LABELS[runs_key]}: {word} methods at their own widths (default (4, 2, 10), 1 restart), "
+          f"against {baseline}; d_gap is the mean over defined cells, run_ratio the geometric mean, d_clamp the mean "
+          "with the envelope held flat past its ends")
     print("  def: defined cells; beat: undefined cells that beat the envelope; exp: undefined cells outside it on the "
           "expensive side; none: resamples with no defined cell")
-    table = headline(rows, runs_key, seeds=seeds, baseline=baseline, methods=methods)
+    table = headline(rows, runs_key, seeds=seeds, baseline=baseline, methods=methods, configs=configs)
     if not table:
         print("  no headline cells on these seeds in these files")
         return
-    print(f"  {'pool':11}{'method':18}{'cells':>6}{'inst':>6}{'drop':>6}  {'d_gap [95% CI]':24}{'def':>4}{'beat':>5}"
-          f"{'exp':>4}{'none':>6}  {'run_ratio [95% CI]':24}{'def':>4}{'beat':>5}{'exp':>4}{'none':>6}")
+    print(f"  {'pool':11}{'method':18}{'cells':>6}{'inst':>6}{'drop':>6}  {'d_clamp [95% CI]':24}"
+          f"{'d_gap [95% CI]':24}{'def':>4}{'beat':>5}{'exp':>4}{'none':>6}  {'run_ratio [95% CI]':24}{'def':>4}"
+          f"{'beat':>5}{'exp':>4}{'none':>6}")
     for h in table:
         print(f"  {h['pool']:11}{h['method']:18}{h['cells']:>6}{h['instances']:>6}{h['dropped']:>6}  "
+              f"{_ci(h['d_clamp'], h['d_clamp_lo'], h['d_clamp_hi']):24}"
               f"{_ci(h['d_gap'], h['d_gap_lo'], h['d_gap_hi']):24}{h['d_gap_cells']:>4}{h['d_gap_beats']:>5}"
               f"{h['d_gap_expensive']:>4}{h['d_gap_none']:>6}  "
               f"{_ci(h['run_ratio'], h['run_ratio_lo'], h['run_ratio_hi'], '.3f'):24}{h['run_ratio_cells']:>4}"
               f"{h['run_ratio_beats']:>5}{h['run_ratio_expensive']:>4}{h['run_ratio_none']:>6}")
 
 
-def _print_settings(tables, summary, baseline, runs_key, cells) -> None:
-    print(f"\nPer setting against {baseline}, {RUN_LABELS[runs_key]}: widths (4, 2, 10), 1 restart; "
-          "over 30 is the share of counted solves over 30 atoms; none counts resamples with d_gap/run_ratio undefined")
-    stats = {(_cell(s), s["method"]): s for s in summary if (s["k"], s["s"], s["l"], s["restarts"]) == HEADLINE_CONFIG}
+def _print_settings(tables, summary, baseline, runs_key, cells, configs=None, methods=None) -> None:
+    configs = configs or {}
+    print(f"\nPer setting against {baseline}, {RUN_LABELS[runs_key]}: each method at its own widths (default (4, 2, 10), "
+          "1 restart); over 30 is the share of counted solves over 30 atoms; none counts resamples with "
+          "d_gap/run_ratio undefined")
+    stats = {(_cell(s), s["method"]): s for s in summary
+             if (s["k"], s["s"], s["l"], s["restarts"]) == tuple(configs.get(s["method"], HEADLINE_CONFIG))}
     for cell in cells:
         print(f"{cell[0]} {cell[1]} n={cell[2]}")
         print(f"    {'method':18}{'inst':>5}{'expl':>5}  {'gap % [95% CI]':22}{'q runs':>8}{'p runs':>8}"
               f"{'over 30':>9}  {'d_gap [95% CI]':24}{'run_ratio [95% CI]':24}{'drop':>5}{'none':>10}")
-        for m in BEAM_METHODS:
-            s = stats.get((cell, m))
-            if s is None:
-                continue
-            R, G, dropped = _prepare(tables[cell], (m, *HEADLINE_CONFIG), baseline, runs_key)
+        for m in sorted({m for c, m in stats if c == cell and (methods is None or m in methods)}, key=_rank):
+            s = stats[cell, m]
+            R, G, dropped = _prepare(tables[cell], (m, *configs.get(m, HEADLINE_CONFIG)), baseline, runs_key)
             g = _gain([(R, G)], 2000, 0)
             print(f"    {m:18}{s['instances']:>5}{s['exploded']:>5}  {_ci(s['gap'], s['gap_lo'], s['gap_hi']):22}"
                   f"{_num(s['quantum_runs'], '.1f'):>8}{_num(s['pasqal_runs'], '.1f'):>8}"
@@ -364,23 +390,28 @@ def main(argv=None) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("paths", nargs="+")
     ap.add_argument("--out", required=True, help="directory for the plots")
-    ap.add_argument("--split", choices=["val", "test"], default="test",
-                    help="seeds to read: validation seeds pooled over the val grid, or test seeds")
+    ap.add_argument("--split", choices=["val", "test", "sel"], default="test",
+                    help="seeds to read: validation seeds pooled over the val grid, test seeds, or selection seeds")
     ap.add_argument("--baselines", default="gls,lin-h2h4",
                     help="comma list: the methods the headline and per-setting tables compare against")
     ap.add_argument("--plot-methods", help="comma list of methods to draw; default all")
+    ap.add_argument("--methods", help="comma list of methods the headline and per-setting tables show; default all")
+    ap.add_argument("--config", action="append", default=[], metavar="METHOD=k,s,l",
+                    help="widths a method is read at in the tables, 1 restart; repeatable; default 4,2,10")
     a = ap.parse_args(argv)
-    seeds = VAL_SEEDS if a.split == "val" else TEST_SEEDS
+    seeds = {"val": VAL_SEEDS, "test": TEST_SEEDS, "sel": SEL_SEEDS}[a.split]
+    configs = {m: (*map(int, w.split(",")), 1) for m, _, w in (c.partition("=") for c in a.config)}
+    methods = a.methods and a.methods.split(",")
     rows = [r for r in load(a.paths) if r["seed"] in seeds]
     summary = summarize(rows, seeds=seeds)
     baselines = a.baselines.split(",")
     for baseline in baselines:
         for runs_key in RUN_KEYS:
-            _print_headline(rows, runs_key, seeds, baseline)
+            _print_headline(rows, runs_key, seeds, baseline, methods, configs=configs)
     if a.split == "val":
         print("\noracle references (exact value pruning, not a structure-track method)")
         for runs_key in RUN_KEYS:
-            _print_headline(rows, runs_key, seeds, "gls", ORACLE_METHODS)
+            _print_headline(rows, runs_key, seeds, "gls", ORACLE_METHODS, "oracle")
     tables = _tables(rows)
     code_finished = {}
     for r in rows:
@@ -389,7 +420,7 @@ def main(argv=None) -> None:
     for baseline, cells in [(b, sorted(tables)) for b in baselines] + [
             ("gls-code", sorted(c for c, ok in code_finished.items() if ok))]:
         for runs_key in RUN_KEYS:
-            _print_settings(tables, summary, baseline, runs_key, cells)
+            _print_settings(tables, summary, baseline, runs_key, cells, configs, methods)
     plot_methods = a.plot_methods and a.plot_methods.split(",")
     paths = [p for runs_key in RUN_KEYS for p in plot(summary, a.out, runs_key, plot_methods)]
     print(f"\nwrote {len(paths)} plots to {a.out}")

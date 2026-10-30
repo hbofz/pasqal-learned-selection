@@ -20,7 +20,7 @@ import numpy as np
 from .dataset import _commit, _setting_name
 from .features import PIECE_FEATURES, VERTEX_FEATURES, graph_features
 from .graphdata import graph_of
-from .instances import HELD_OUT_SETTINGS, TEST_SEEDS
+from .instances import HELD_OUT_SETTINGS, SEL_SEEDS, TEST_SEEDS
 from .models import fit_value_linear, save, topk_regret
 
 import torch
@@ -34,13 +34,13 @@ _QUIET = lambda *_: None
 
 
 def load_pickles(paths) -> tuple[list[dict], list[dict]]:
-    """(the meta of each file, the concatenated states). Refuses test seeds and held-out settings."""
+    """(the meta of each file, the concatenated states). Refuses test and selection seeds and held-out settings."""
     loaded = [pickle.load(open(p, "rb")) for p in paths]
     states = [r for d in loaded for r in d["states"]]
     held_out = {_setting_name(f, p) for f, p in HELD_OUT_SETTINGS}
     for r in states:
-        if r["seed"] in TEST_SEEDS:
-            raise ValueError(f"seed {r['seed']} is a test seed; it must not be used for training or validation")
+        if r["seed"] in TEST_SEEDS or r["seed"] in SEL_SEEDS:
+            raise ValueError(f"seed {r['seed']} is a test or selection seed; it must not train or validate")
         if r["setting"] in held_out:
             raise ValueError(f"setting {r['setting']} is held out; it must not be used for training or validation")
     return [d["meta"] for d in loaded], states

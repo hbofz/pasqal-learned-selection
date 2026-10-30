@@ -1,8 +1,9 @@
 import json, numpy as np, pytest
-from learned_selection.bench import (BEAM_METHODS, NEW_METHODS, ORACLE_METHODS, gap_pct, parse_method, run_instance,
-                                     shard, main as bench_main)
+from learned_selection.bench import (BEAM_METHODS, NEW_METHODS, ORACLE_METHODS, gap_pct, grid, known_method,
+                                     parse_method, run_instance, search_of, shard, track_of, main as bench_main)
 from learned_selection.curves import bootstrap_ci, curve_gain, load, paired
 from learned_selection.features import PIECE_FEATURES, VERTEX_FEATURES
+from learned_selection.instances import TEST_SEEDS, TRAIN_SEEDS, VAL_SEEDS
 from learned_selection.models import fit_lgbm, fit_linear, save
 
 KEYS = {"family", "params", "n", "p", "seed", "method", "track", "k", "s", "l", "restarts", "lattice",
@@ -110,3 +111,38 @@ def test_a_gnn_file_with_the_wrong_head_is_refused(tmp_path):
     save_gnn(GNN("gin", "vertex", np.zeros(d), np.ones(d), np.zeros(p), np.ones(p)), tmp_path / "gin-h4.pt")
     with pytest.raises(ValueError, match=r"gin-h4\.pt.*'vertex'.*'piece'"):
         method_runner("gin-h4", tmp_path)
+
+
+def test_sel_grid_is_training_settings_on_unused_seeds():
+    g = grid("sel")
+    assert len(g) == 8 * 2 * 20 and {s for *_, s in g} == set(range(105, 125))
+    assert not {s for *_, s in g} & (set(TEST_SEEDS) | set(TRAIN_SEEDS) | set(VAL_SEEDS))
+
+
+def test_parse_method_with_new_kinds_and_search():
+    assert parse_method("dlin-h2h4+dsage-h5") == [("dlin", "h2"), ("dlin", "h4"), ("dsage", "h5")]
+    assert parse_method("lin-h2+gin-h4+sage-h5+mcts") == [("lin", "h2"), ("gin", "h4"), ("sage", "h5")]
+    assert search_of("lin-h2+gin-h4+sage-h5+mcts") == 1.0
+    assert search_of("lin-h2+gin-h4+sage-h5+mcts-c0.5") == 0.5
+    assert search_of("lin-h2h4+sage-h5") is None
+    with pytest.raises(ValueError):
+        parse_method("lin-h2+gin-h4+mcts")     # no value model
+    with pytest.raises(ValueError):
+        parse_method("mcts")
+
+
+def test_known_method_and_track():
+    assert known_method("dgin-h2h4h5") and known_method("gls") and known_method("exact")
+    assert not known_method("foo-h2")
+    assert track_of("gls-screen") == "hybrid" and track_of("exact-h5") == "oracle"
+    assert track_of("dgin-h2h4h5") == "structure"
+    assert track_of("lin-h2+gin-h4+sage-h5+mcts") == "structure" and track_of("greedy-mindeg") == "classical"
+    assert track_of("exact") == "classical"
+
+
+def test_a_search_name_has_no_runner_yet():
+    from learned_selection.bench import method_runner
+    with pytest.raises(ValueError):
+        method_runner("foo-h2", None)
+    with pytest.raises(NotImplementedError):
+        method_runner("lin-h2+gin-h4+sage-h5+mcts", None)

@@ -18,8 +18,8 @@ import networkx as nx
 
 from . import dataset
 from .engine import RunResult, _remove_closed, best_of_restarts, run_code_bounded, run_code_faithful, run_paper_faithful
-from .instances import (BIG_N, BIG_SETTINGS, HELD_OUT_SETTINGS, TEST_SEEDS, TEST_SIZES, TRAIN_SETTINGS, VAL_SEEDS,
-                        make)
+from .instances import (BIG_N, BIG_SETTINGS, HELD_OUT_SETTINGS, SEL_SEEDS, SEL_SIZES, TEST_SEEDS, TEST_SIZES,
+                        TRAIN_SETTINGS, VAL_SEEDS, make)
 from .lattice import BLOCKADE_UM
 from .models import h2_score, h4_rank, linear_value, load, load_theta, theta_score
 from .solvers import exact_mis, is_independent, min_degree_greedy
@@ -34,14 +34,21 @@ ORACLE_METHODS = ["exact-h5", "lin-h2h4+exact-h5"]
 BEAM_METHODS = ["gls-code", "gls", "gls-paper", "gls-screen", "lin-h2", "lin-h4", "lin-h2h4", "lgb-h2", "lgb-h4",
                 "lgb-h2h4", "cma-h2"] + NEW_METHODS + ORACLE_METHODS
 CLASSICAL_METHODS = ["greedy-pasqal", "greedy-mindeg", "exact"]
-TRACKS = {**{m: "oracle" if "exact" in m else "structure" for m in BEAM_METHODS}, "gls-screen": "hybrid",
-          **{m: "classical" for m in CLASSICAL_METHODS}}
-KIND_EXT = {"lin": ".json", "lgb": ".txt", "gin": ".pt", "sage": ".pt", "gat": ".pt"}
-GNN_KINDS = ("gin", "sage", "gat")
+KIND_EXT = {"lin": ".json", "lgb": ".txt", "gin": ".pt", "sage": ".pt", "gat": ".pt", "dlin": ".json", "dgin": ".pt",
+            "dsage": ".pt", "dgat": ".pt", "az": ".pt"}
+GNN_KINDS = ("gin", "sage", "gat", "dgin", "dsage", "dgat", "az")
+LINEAR_KINDS = ("lin", "dlin")
+SEARCH = re.compile(r"mcts(?:-c(\d+(?:\.\d+)?))?")
 MINDEG_SEEDS = 20
 SMALL = 5
 COSTS = ("quantum_runs", "pasqal_runs", "atoms", "rounds", "classical_s", "solver_s", "max_atoms", "over_30",
          "atoms_all")
+
+
+def track_of(method: str) -> str:
+    if method in CLASSICAL_METHODS:
+        return "classical"
+    return "hybrid" if method == "gls-screen" else "oracle" if "exact" in method else "structure"
 
 
 def gap_pct(size: int, best: int) -> float:
@@ -80,10 +87,12 @@ def _model(path: Path):
 
 def parse_method(name: str) -> list[tuple[str, str]]:
     """"lin-h2h4+gin-h5" -> [("lin", "h2"), ("lin", "h4"), ("gin", "h5")]: one (kind, hook) per hook, in the order
-    written. Raises ValueError on an unknown kind, a malformed or repeated hook, lgb with h5 (there is no LightGBM
-    value model), or exact with any hook but h5."""
-    out = []
-    for part in name.split("+"):
+    written. A trailing "mcts" or "mcts-c<float>" part is dropped, and then h2, h4 and h5 must all be given. Raises
+    ValueError on an unknown kind, a malformed or repeated hook, lgb with h5 (there is no LightGBM value model), or
+    exact with any hook but h5."""
+    out, parts = [], name.split("+")
+    searching = SEARCH.fullmatch(parts[-1]) is not None
+    for part in parts[:-1] if searching else parts:
         kind, _, hooks = part.partition("-")
         if kind != "exact" and kind not in KIND_EXT:
             raise ValueError(f"{name!r}: unknown model kind {kind!r}")
@@ -96,7 +105,24 @@ def parse_method(name: str) -> list[tuple[str, str]]:
             if hook in (h for _, h in out):
                 raise ValueError(f"{name!r}: {hook} given twice")
             out.append((kind, hook))
+    if searching and {h for _, h in out} != {"h2", "h4", "h5"}:
+        raise ValueError(f"{name!r}: tree search needs h2, h4 and h5 hooks")
     return out
+
+
+def search_of(name: str) -> float | None:
+    """The exploration constant of a tree-search name (1.0 for plain "mcts"), None for any other name."""
+    found = SEARCH.fullmatch(name.split("+")[-1])
+    return None if found is None else float(found[1] or 1.0)
+
+
+def known_method(name: str) -> bool:
+    if name in BEAM_METHODS or name in CLASSICAL_METHODS:
+        return True
+    try:
+        return bool(parse_method(name))
+    except ValueError:
+        return False
 
 
 def exact_value(graphs: list[nx.Graph]) -> list[int]:
@@ -119,10 +145,18 @@ def _hook(kind: str, hook: str, d: Path):
     return keyword, {"h2": h2_score, "h4": h4_rank, "h5": linear_value}[hook](model)
 
 
+def method_hooks(name: str, models_dir) -> dict:
+    """The score, rank and value keywords of a composed name, tree-search names included."""
+    d = Path(models_dir or "models")
+    return dict(_hook(kind, hook, d) for kind, hook in parse_method(name))
+
+
 def method_runner(name: str, models_dir, max_branches: int = 1_000) -> Callable[[nx.Graph, int, int, int, int], RunResult]:
     """run(graph, k, s, l, seed) for a beam method."""
-    if name not in BEAM_METHODS:
+    if not known_method(name) or name in CLASSICAL_METHODS:
         raise ValueError(f"unknown beam method {name!r}")
+    if search_of(name) is not None:
+        raise NotImplementedError("tree search is not available yet")
     if name == "gls-code":
         return lambda G, k, s, l, seed: run_code_faithful(G, k, s, l, seed=seed, max_branches=max_branches)
     if name == "gls-paper":
@@ -134,7 +168,7 @@ def method_runner(name: str, models_dir, max_branches: int = 1_000) -> Callable[
     elif name == "cma-h2":
         hooks["score"] = theta_score(_model(d / "cma-h2.json"))
     elif name != "gls":
-        hooks = dict(_hook(kind, hook, d) for kind, hook in parse_method(name))
+        hooks = method_hooks(name, models_dir)
     return lambda G, k, s, l, seed: run_code_bounded(G, k, s, l, seed=seed, max_branches=max_branches, **hooks)
 
 
@@ -144,7 +178,7 @@ def run_instance(family, params, n, seed, methods, widths, restarts, time_limit_
     rows, proven = [], None
 
     def record(method, k, s, l, r, solution, costs):
-        rows.append(dict(method=method, track=TRACKS[method], k=k, s=s, l=l, restarts=r,
+        rows.append(dict(method=method, track=track_of(method), k=k, s=s, l=l, restarts=r,
                          piece_solver=None if k is None else "exact-top-s", solution=solution, **costs))
 
     def classical(method, solve, r):
@@ -211,6 +245,8 @@ def grid(name: str) -> list[tuple]:
         return [(f, p, n, s) for f, p in TRAIN_SETTINGS + HELD_OUT_SETTINGS for n in TEST_SIZES for s in TEST_SEEDS]
     if name == "val":
         return [(f, p, 100, s) for f, p in TRAIN_SETTINGS for s in VAL_SEEDS]
+    if name == "sel":
+        return [(f, p, n, s) for f, p in TRAIN_SETTINGS for n in SEL_SIZES for s in SEL_SEEDS]
     return [(f, p, BIG_N, s) for f, p in BIG_SETTINGS for s in TEST_SEEDS[:10]]
 
 
@@ -238,7 +274,7 @@ def _job(job: tuple, **kw) -> list[dict]:
 
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--grid", choices=["test", "val", "big"])
+    ap.add_argument("--grid", choices=["test", "val", "sel", "big"])
     ap.add_argument("--family")
     ap.add_argument("--params", default="", help='e.g. "p=0.25" or "blocks=4,p_in=0.3,p_out=0.03"')
     ap.add_argument("--n", type=int)
@@ -256,7 +292,7 @@ def main(argv=None) -> None:
     a = ap.parse_args(argv)
 
     methods = a.methods.split(",")
-    unknown = set(methods) - set(BEAM_METHODS + CLASSICAL_METHODS)
+    unknown = {m for m in methods if not known_method(m)}
     if unknown:
         ap.error(f"unknown methods: {', '.join(sorted(unknown))}")
     if a.grid:
