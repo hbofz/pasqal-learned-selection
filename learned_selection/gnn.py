@@ -155,12 +155,13 @@ class GNN(nn.Module):
             self.register_buffer(name, torch.where(a == 0, torch.ones_like(a), a) if name.endswith("sd") else a)
         self.embed = nn.Linear(len(VERTEX_FEATURES), hidden)
         self.convs = nn.ModuleList(_CONV[conv](hidden, heads) for _ in range(layers))
+        self.norms = nn.ModuleList(nn.LayerNorm(hidden) for _ in range(layers))
         self.out = _mlp({"piece": 4 * hidden + d_piece}.get(head, hidden), hidden, 1)
 
     def forward(self, b: Batch) -> torch.Tensor:
         h = self.embed((b.x - self.mu) / self.sd)
-        for conv in self.convs:
-            h = h + torch.relu(conv(h, b.edge_index))
+        for conv, norm in zip(self.convs, self.norms):
+            h = norm(h + torch.relu(conv(h, b.edge_index)))
         if self.head == "vertex":
             return self.out(h).squeeze(1)
         if self.head == "value":

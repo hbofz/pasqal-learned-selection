@@ -28,6 +28,8 @@ from .gnn import CONVS, GNN, collate, encode, save_gnn
 
 WARM_AGREEMENT = 0.95
 PRUNE_K = 4
+GRAD_CLIP = 5.0
+LARGE = 60   # children of at least this many nodes get their own error figure
 _QUIET = lambda *_: None
 
 
@@ -138,6 +140,7 @@ def train_ranker(conv: str, hook: str, train: list[dict], val: list[dict], devic
                                  to_t(weight[idx], torch.float32))
             opt.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(net.parameters(), GRAD_CLIP)
             opt.step()
 
     def evaluate():
@@ -216,10 +219,18 @@ def _encode_state_rows(job: tuple) -> list:
     return [encode(g)] + [encode(g.subgraph(c.tolist()).copy()) for c in children]
 
 
-def _row_metrics(pred, alpha, s, group, child) -> dict:
-    return dict(val_mae=float(np.abs(pred - alpha).mean()), mae_of_zero=float(np.abs(alpha).mean()),
+def _row_metrics(pred, alpha, s, group, child, n) -> dict:
+    err = np.abs(pred - alpha)
+    mean = lambda mask: float(err[mask].mean()) if mask.any() else None
+    return dict(val_mae=float(err.mean()), mae_of_zero=float(np.abs(alpha).mean()), child_mae=mean(child),
+                state_mae=mean(~child), large_child_mae=mean(child & (n >= LARGE)),
                 prune_regret=float(topk_regret((s + pred)[child], (s + alpha)[child], group[child], PRUNE_K)),
                 rule_prune_regret=float(topk_regret(s[child], (s + alpha)[child], group[child], PRUNE_K)))
+
+
+def _better(a: dict, b: dict) -> bool:
+    """Whether epoch summary a beats b: lower prune regret, and on a tie lower child error."""
+    return (a["prune_regret"], a["child_mae"]) < (b["prune_regret"], b["child_mae"])
 
 
 def _row_arrays(states: list[dict], cap: int, seed: int) -> dict:
@@ -235,7 +246,7 @@ def train_value(conv: str, train: list[dict], val: list[dict], device, epochs: i
                 batch: int = 16, lr: float = 1e-3, seed: int = 0, cap: int = 64, workers: int = 1,
                 log=_QUIET) -> tuple[GNN, dict]:
     """Train a value network on the rows of value_rows. `batch` counts states. The loss is Huber on alpha plus a
-    listwise loss that orders each state's children. Kept at the lowest validation pruning regret."""
+    listwise loss that orders each state's children. Kept at the lowest validation pruning regret, ties broken by the child error."""
     start = time.perf_counter()
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
@@ -252,6 +263,7 @@ def train_value(conv: str, train: list[dict], val: list[dict], device, epochs: i
                                                for i in used], workers)
         arrays.update(batches=[b for bs in per_state for b in bs], ends=np.cumsum(counts))
         arrays["starts"] = arrays["ends"] - counts
+        arrays["n"] = np.array([len(b.x) for b in arrays["batches"]])
         return arrays
 
     tr, va = prepare(train), prepare(val)
@@ -278,21 +290,23 @@ def train_value(conv: str, train: list[dict], val: list[dict], device, epochs: i
                 loss = loss + listwise_loss((s + pred)[c], (s + alpha)[c], to_t(dense, torch.long), 1)
             opt.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(net.parameters(), GRAD_CLIP)
             opt.step()
 
     def evaluate():
         net.cpu()
         pred = _predict(net, va["batches"])
         net.to(device)
-        return _row_metrics(pred, va["alpha"], va["s"], va["group"], va["child"])
+        return _row_metrics(pred, va["alpha"], va["s"], va["group"], va["child"], va["n"])
 
-    best, best_state, best_epoch, history = None, None, 0, []
+    best, best_state, best_epoch, history, mae_history = None, None, 0, [], []
     for e in range(1, epochs + 1):
         run_epoch()
         m = evaluate()
         history.append(m["prune_regret"])
+        mae_history.append(m["child_mae"])
         log(f"epoch {e}: val prune regret {m['prune_regret']:.4f}, mae {m['val_mae']:.3f}")
-        if best is None or m["prune_regret"] < best["prune_regret"]:
+        if best is None or _better(m, best):
             best, best_epoch = m, e
             best_state = {n: v.detach().clone() for n, v in net.state_dict().items()}
         elif e - best_epoch >= patience:
@@ -300,9 +314,9 @@ def train_value(conv: str, train: list[dict], val: list[dict], device, epochs: i
     if best_state is not None:
         net.load_state_dict(best_state)
     net.cpu().eval()
-    return net, dict(**(best or evaluate()), best_epoch=best_epoch, history=history, epochs_run=len(history),
-                     rows=len(tr["alpha"]), val_rows=len(va["alpha"]), encode_seconds=encode_seconds,
-                     seconds=time.perf_counter() - start)
+    return net, dict(**(best or evaluate()), best_epoch=best_epoch, history=history, mae_history=mae_history,
+                     epochs_run=len(history), rows=len(tr["alpha"]), val_rows=len(va["alpha"]),
+                     encode_seconds=encode_seconds, seconds=time.perf_counter() - start)
 
 
 def fit_linear_value_job(train: list[dict], val: list[dict], cap: int = 64):
@@ -320,7 +334,7 @@ def fit_linear_value_job(train: list[dict], val: list[dict], cap: int = 64):
     Xv, v = features(val)
     if not v["child"].any():
         raise ValueError("no children with a proven value")
-    return model, dict(**_row_metrics(model.predict(Xv), v["alpha"], v["s"], v["group"], v["child"]),
+    return model, dict(**_row_metrics(model.predict(Xv), v["alpha"], v["s"], v["group"], v["child"], Xv[:, 0]),
                        rows=len(y["alpha"]), val_rows=len(v["alpha"]), seconds=time.perf_counter() - start)
 
 

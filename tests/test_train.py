@@ -48,3 +48,9 @@ def test_load_states_refuses_test_seeds_and_held_out_settings(tmp_path):
         path.write_bytes(pickle.dumps({"meta": {}, "states": [ok, bad]}))
         with pytest.raises(ValueError):
             load_states([path])
+
+def test_value_selection_prefers_lower_regret_then_lower_child_error():
+    from learned_selection.train import _better
+    a, b = dict(prune_regret=0.0, child_mae=0.3), dict(prune_regret=0.0, child_mae=0.5)
+    assert _better(a, b) and not _better(b, a)
+    assert _better(dict(prune_regret=0.0, child_mae=9.0), dict(prune_regret=0.1, child_mae=0.1))
