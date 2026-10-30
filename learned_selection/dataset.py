@@ -42,12 +42,16 @@ def collect_states(G: nx.Graph, k: int = 4, s: int = 2, l: int = 10, max_states:
     return states
 
 
-def q_values(g: nx.Graph, maps: list[dict], s: int = 2, small: int = 5, time_limit_s: float = 20.0,
-             workers: int = 1) -> list[int] | None:
-    """For each candidate, the size of the best independent set of g that commits to one of the piece's sets
-    (the engine's own choice of sets: the first maximum set for a piece of `small` nodes or fewer, else the top
-    s maximal sets) and finishes the rest exactly. One solve per distinct vertex set. None if any is unproven."""
+def children_values(g: nx.Graph, maps: list[dict], s: int = 2, small: int = 5, time_limit_s: float = 20.0,
+                    workers: int = 1) -> tuple[list[int] | None, list[tuple[list, int, int]]]:
+    """Q* per candidate, and every child the labels solved. For each distinct vertex set, in first-seen order,
+    the engine's own sets are tried (the first maximum set for a piece of `small` nodes or fewer, else the top
+    s maximal sets); the child of a set S is the graph left after removing S and its neighbours. Q* is the size
+    of the best independent set of g that commits to one of the piece's sets and finishes the rest exactly.
+    The children are (nodes of the child, its exact independence number, len(S)) in evaluation order.
+    On the first unproven solve it stops: Q* is None and the children proven so far come back."""
     best: dict[frozenset, int] = {}
+    children: list[tuple[list, int, int]] = []
     for m in maps:
         key = frozenset(m)
         if key in best:
@@ -56,12 +60,21 @@ def q_values(g: nx.Graph, maps: list[dict], s: int = 2, small: int = 5, time_lim
         sets = [first_maximum_set(piece)] if len(key) <= small else top_maximal_sets(piece, s)
         total = 0
         for S in sets:
-            rest, proven = exact_mis(_remove_closed(g, S), time_limit_s, workers)
+            child = _remove_closed(g, S)
+            rest, proven = exact_mis(child, time_limit_s, workers)
             if not proven:
-                return None
+                return None, children
+            children.append((list(child), len(rest), len(S)))
             total = max(total, len(S) + len(rest))
         best[key] = total
-    return [best[frozenset(m)] for m in maps]
+    return [best[frozenset(m)] for m in maps], children
+
+
+def q_values(g: nx.Graph, maps: list[dict], s: int = 2, small: int = 5, time_limit_s: float = 20.0,
+             workers: int = 1) -> list[int] | None:
+    """For each candidate, the size of the best independent set of g that commits to one of the piece's sets
+    and finishes the rest exactly. One solve per set of each distinct vertex set. None if any is unproven."""
+    return children_values(g, maps, s, small, time_limit_s, workers)[0]
 
 
 def mis_membership(g: nx.Graph, time_limit_s: float = 20.0, workers: int = 1) -> dict | None:
@@ -126,8 +139,20 @@ def _arrays(parts: list[tuple], width: int) -> tuple[np.ndarray, np.ndarray, np.
 
 
 def _commit() -> str:
-    return subprocess.run(["git", "describe", "--always", "--dirty"], cwd=Path(__file__).parent, text=True,
-                          capture_output=True, check=True).stdout.strip()
+    """`git describe --always --dirty`; in an exported copy without .git, the contents of COMMIT at the repo
+    root, else "unknown". Never raises."""
+    root = Path(__file__).parent.parent
+    try:
+        out = subprocess.run(["git", "describe", "--always", "--dirty"], cwd=root, text=True,
+                             capture_output=True, check=True).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    if out:
+        return out
+    try:
+        return (root / "COMMIT").read_text().strip() or "unknown"
+    except OSError:
+        return "unknown"
 
 
 def main(argv=None) -> None:

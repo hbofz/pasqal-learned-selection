@@ -7,7 +7,7 @@
 Records are appended as each instance finishes. A rerun skips every (instance, method) already in --out, so an
 interrupted grid resumes; widths and restarts are not part of that check, so use a new --out to change them.
 """
-import argparse, json, subprocess, sys, time
+import argparse, json, sys, time
 from contextlib import nullcontext
 from functools import cache, partial
 from multiprocessing import Pool
@@ -16,6 +16,7 @@ from typing import Callable
 
 import networkx as nx
 
+from . import dataset
 from .engine import RunResult, _remove_closed, best_of_restarts, run_code_bounded, run_code_faithful, run_paper_faithful
 from .instances import (BIG_N, BIG_SETTINGS, HELD_OUT_SETTINGS, TEST_SEEDS, TEST_SIZES, TRAIN_SETTINGS, VAL_SEEDS,
                         make)
@@ -38,10 +39,7 @@ def gap_pct(size: int, best: int) -> float:
     return 0.0 if best == 0 else 100 * (best - size) / best
 
 
-@cache
-def _commit() -> str:
-    return subprocess.run(["git", "describe", "--always", "--dirty"], capture_output=True, text=True,
-                          cwd=Path(__file__).parent).stdout.strip()
+_commit = cache(dataset._commit)
 
 
 def screen_rank(g: nx.Graph, maps: list[dict]) -> list[int]:
