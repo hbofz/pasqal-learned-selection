@@ -106,7 +106,7 @@ def run_mcts(graph: nx.Graph, k: int, s: int, budget: int, score: VertexScore, r
                     raise ValueError(f"piece solver returned an invalid set: {sorted(S, key=repr)}")
         rest = [_remove_closed(node.g, S) for S in sets]
         kids = [_Node(h, node.sol + list(S), node.depth + 1, len(node.sol) + len(S) + float(v))
-                for h, S, v in zip(rest, sets, value(rest))]
+                for h, S, v in zip(rest, sets, value(rest), strict=True)]
         node.kids += [(q, prior / len(kids)) for q in kids]
         return kids
 
