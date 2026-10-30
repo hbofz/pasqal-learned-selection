@@ -1,6 +1,7 @@
 """Learned rankers for the two places GLS makes a greedy choice: which vertex to place next while a piece grows
 (growth hook) and which candidate pieces to solve (candidate-choice hook). A weighted ridge model and a
-LightGBM lambdarank model, both trained on the labelled states from dataset.py.
+LightGBM lambdarank model, both trained on the labelled states from dataset.py. Also the three-number growth
+score that evolve.py tunes with CMA-ES.
 
     uv run python -m learned_selection.models --train cache/train.npz --val cache/val.npz --out models/
 
@@ -114,6 +115,33 @@ def load(path):
     if path.suffix == ".txt":
         return lgb.Booster(model_file=str(path))
     raise ValueError(f"cannot load a model from {path.suffix!r}; use .json or .txt")
+
+
+GLS_THETA = (5.0, 0.0, 0.0)   # target degree t, weight a on placed neighbours, weight c on raw degree
+
+
+def decode(x) -> tuple:
+    """CMA-ES coordinates to a theta; the origin is GLS_THETA."""
+    return (float(5 + 5 * x[0]), float(x[1]), float(x[2]))
+
+
+def theta_score(theta) -> VertexScore:
+    """Growth hook: GLS's score with a tunable target degree, plus a reward for vertices that already have
+    placed neighbours and one for high degree in the state graph. At GLS_THETA the extra terms add exactly 0.0,
+    so it reproduces gls_score(5) bit for bit."""
+    t, a, c = theta
+    def for_state(g):
+        def score(grow, cands):
+            placed = lambda v: len(g._adj[v].keys() & grow.mapping.keys())
+            return [1 - abs(t - grow.deg(v)) / grow.n + a * placed(v) / grow.n + c * g.degree(v) / len(g)
+                    for v in cands]
+        return score
+    return for_state
+
+
+def load_theta(path) -> tuple:
+    """The theta stored in a result file written by evolve.py."""
+    return tuple(json.loads(Path(path).read_text())["theta"])
 
 
 def main(argv=None) -> None:
