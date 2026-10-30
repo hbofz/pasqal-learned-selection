@@ -26,8 +26,8 @@ DEFERRED_TIME_LIMIT_S = 120.0
 
 def collect_states(G: nx.Graph, k: int = 4, s: int = 2, l: int = 10, max_states: int = 12,
                    seed: int = 0) -> list[nx.Graph]:
-    """The distinct graphs (by node set) the beam hands to the generator on G, in visit order. When there are
-    more than max_states, a seeded random sample of them, still in visit order."""
+    """The distinct graphs (by node set) the beam hands to the generator on G, in visit order; the first is G
+    itself. When there are more than max_states, G plus a seeded random sample of the rest, still in visit order."""
     generate, seen = gls_generator(), {}
 
     def record(g: nx.Graph, k: int):
@@ -37,7 +37,8 @@ def collect_states(G: nx.Graph, k: int = 4, s: int = 2, l: int = 10, max_states:
     run_beam(G, record, exact_piece_solver, k, s, code_prune(k, l, count_small=True))
     states = list(seen.values())
     if len(states) > max_states:
-        states = [states[i] for i in sorted(random.Random(seed).sample(range(len(states)), max_states))]
+        rest = sorted(random.Random(seed).sample(range(1, len(states)), max_states - 1))
+        states = [states[0]] + [states[i] for i in rest]
     return states
 
 

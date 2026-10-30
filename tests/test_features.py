@@ -3,7 +3,7 @@ from learned_selection import features
 from learned_selection.dataset import collect_states, label_instance, mis_membership, q_values
 from learned_selection.engine import _remove_closed, gls_generator
 from learned_selection.features import PIECE_FEATURES, VERTEX_FEATURES, piece_features, vertex_features
-from learned_selection.instances import TEST_SEEDS, erdos_renyi
+from learned_selection.instances import TEST_SEEDS, erdos_renyi, make
 from learned_selection.solvers import exact_mis, first_maximum_set, is_independent, top_maximal_sets
 
 def test_features_shapes_and_finite_on_degenerate_states():
@@ -72,6 +72,12 @@ def test_collect_states_deterministic_and_distinct():
     a, b = collect_states(G, max_states=12, seed=0), collect_states(G, max_states=12, seed=0)
     assert [set(g) for g in a] == [set(g) for g in b]
     assert len({frozenset(g) for g in a}) == len(a) <= 12 and all(len(g) > 5 for g in a)
+
+def test_collect_states_keeps_the_full_graph():
+    G = make("power_law", 150, 0, m=2)   # visits well over 12 states
+    states = collect_states(G, max_states=12, seed=0)
+    assert len(states) == 12 and set(states[0]) == set(G)
+    assert len({frozenset(g) for g in states}) == 12
 
 def test_label_instance_refuses_test_seeds():
     with pytest.raises(ValueError, match="test seed"):
