@@ -42,3 +42,11 @@ def test_summarize_counts_separates_raw_quality_from_repair():
     assert top_g == [frozenset({0, 2, 4})] and st_g["invalid_rate"] == 0 and st_g["valid_sizes"] == {3: 500}
     assert st_n["invalid_rate"] == 1 and st_n["valid_sizes"] == {}
     assert all(len(S) == 3 for S in top_n)       # repair alone reaches the optimum: decisions must use raw stats
+
+def test_virtual_device_takes_large_pieces():
+    from learned_selection.cloud import virtual_device
+    from learned_selection.instances import power_law
+    G = power_law(150, 8, 0)
+    m = next(m for m in gls_generator()(G, len(G)) if len(m) > 30)
+    seq = piece_sequence(G.subgraph(m), m, virtual_device())
+    assert len(seq.register.qubits) == len(m) and seq.to_abstract_repr()

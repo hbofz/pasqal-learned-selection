@@ -1,26 +1,37 @@
 """Calibrate the exact classical stand-in against a Pasqal cloud emulator.
 
-    uv run python -m learned_selection.calibrate [--set small|medium]
+    uv run python -m learned_selection.calibrate [--set small|medium|large]
 
-Pieces: the first-round GLS candidates (k=4) of the graphs in SETS (small: 11-20 atoms, medium: 25-26). Each piece is
-solved exactly and on the emulator, and also fed uniformly random bitstrings as a control, because repair alone
-can turn noise into an optimal set on small pieces. Decisions therefore rest on raw (pre-repair) statistics.
+Pieces: the first-round GLS candidates (k=4) of the graphs in SETS (small: 11-20 atoms, medium: 25-26). The large set
+is 40 first-round candidates over 30 atoms from sparse graph families, run on virtual_device() (AnalogDevice with its
+layout filling cap lifted). Each piece is solved exactly and on the emulator, and also fed uniformly random bitstrings
+as a control, because repair alone can turn noise into an optimal set on small pieces. Decisions therefore rest on
+raw (pre-repair) statistics.
 """
-import argparse, json, random, statistics, threading
+import argparse, json, random, statistics, threading, zlib
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 
-from .cloud import EMULATION_DEVICE, CloudPieceSolver, client, summarize_counts
+from pulser.devices import VirtualDevice
+
+from .cloud import EMULATION_DEVICE, CloudPieceSolver, client, summarize_counts, virtual_device
 from .engine import gls_generator
-from .instances import erdos_renyi
+from .instances import erdos_renyi, power_law, sbm, unit_disk
 from .solvers import top_maximal_sets
 
 RUNS, S = 500, 2
 MAX_ATOMS = 30   # AnalogDevice: max layout filling 0.5 of 61 traps
+LARGE_MAX_ATOMS = 61   # virtual_device(): every trap of the lattice
+LARGE_GRAPHS = [("power_law", power_law, dict(n=150, m=2)), ("power_law", power_law, dict(n=150, m=8)),
+                ("sbm", sbm, dict(n=150, blocks=4, p_in=0.3, p_out=0.03)),
+                ("unit_disk", unit_disk, dict(n=150, radius=0.15))]
+LARGE_SEEDS, LARGE_COUNT = (0, 1), 40
 SETS = {"small": [(60, p, seed) for p in (0.25, 0.5) for seed in range(5)],
         "medium": [(300, 0.25, seed) for seed in range(10)]}
-OUT = {"small": Path("results/calibration.jsonl"), "medium": Path("results/calibration_medium.jsonl")}
+OUT = {"small": Path("results/calibration.jsonl"), "medium": Path("results/calibration_medium.jsonl"),
+       "large": Path("results/calibration_large.jsonl")}
 _local = threading.local()
 
 
@@ -31,6 +42,27 @@ def pieces(graphs):
             yield dict(n=n, p=p, seed=seed, candidate=i), G.subgraph(m).copy(), m
 
 
+def large_pieces():
+    """Every distinct first-round candidate over MAX_ATOMS atoms from the LARGE_GRAPHS, sorted by (size, family,
+    seed, candidate), of which LARGE_COUNT are taken evenly spaced across that order."""
+    found = []
+    for f, (family, make, params) in enumerate(LARGE_GRAPHS):
+        for seed in LARGE_SEEDS:
+            G, seen = make(**params, seed=seed), set()
+            for i, m in enumerate(gls_generator()(G, len(G))):
+                if len(m) > MAX_ATOMS and frozenset(m) not in seen:
+                    seen.add(frozenset(m))
+                    found.append((len(m), f, seed, i, dict(family=family, params=params, seed=seed, candidate=i),
+                                  G.subgraph(m).copy(), m))
+    found.sort(key=lambda t: t[:4])
+    return [found[round(i * (len(found) - 1) / (LARGE_COUNT - 1))][4:] for i in range(LARGE_COUNT)]
+
+
+BUILD = {"small": lambda: pieces(SETS["small"]), "medium": lambda: pieces(SETS["medium"]), "large": large_pieces}
+DEVICE = {"small": EMULATION_DEVICE, "medium": EMULATION_DEVICE, "large": virtual_device()}
+ATOM_CAP = {"small": MAX_ATOMS, "medium": MAX_ATOMS, "large": LARGE_MAX_ATOMS}
+
+
 def jaccard(a, b) -> float:
     return len(a & b) / len(a | b) if a | b else 1.0
 
@@ -39,15 +71,20 @@ def raw_opt_rate(stats, opt):
     return stats["valid_sizes"].get(opt, 0) / stats["shots"]
 
 
-def calibrate_one(item):
+def calibrate_one(item, which="small"):
     meta, piece, m = item
+    device = DEVICE[which]
+    device_name = f"virtual {device.name}" if isinstance(device, VirtualDevice) else device.name
     if not hasattr(_local, "solver"):
-        _local.solver = CloudPieceSolver(client(), EMULATION_DEVICE, runs=RUNS)
+        _local.solver = CloudPieceSolver(client(), device, runs=RUNS)
     exact = top_maximal_sets(piece, S)
     opt = len(exact[0])
     emu_top = _local.solver(piece, m, S)
     emu = _local.solver.log[-1]
-    rng = random.Random(hash((meta["p"], meta["seed"], meta["candidate"])) & 0xFFFF)
+    # hash of a string changes between runs, so the large set's control is seeded from a checksum instead
+    control_seed = hash((meta["p"], meta["seed"], meta["candidate"])) & 0xFFFF if "p" in meta \
+        else zlib.crc32(json.dumps(meta, sort_keys=True).encode())
+    rng = random.Random(control_seed)
     noise = Counter("".join(rng.choice("01") for _ in piece) for _ in range(RUNS))
     rnd_top, rnd = summarize_counts(piece, noise, [str(v) for v in piece], S)
     return dict(**meta, n_atoms=len(piece), opt=opt, exact_top_sizes=[len(x) for x in exact],
@@ -55,20 +92,20 @@ def calibrate_one(item):
                 emu_top_sizes=[len(x) for x in emu_top], emu_invalid_rate=emu["invalid_rate"],
                 emu_raw_opt_rate=raw_opt_rate(emu, opt), rnd_top_sizes=[len(x) for x in rnd_top],
                 rnd_invalid_rate=rnd["invalid_rate"], rnd_raw_opt_rate=raw_opt_rate(rnd, opt),
-                emulator="EMU_MPS", device=EMULATION_DEVICE.name, runs=RUNS, batch_id=emu["batch_id"])
+                emulator="EMU_MPS", device=device_name, runs=RUNS, batch_id=emu["batch_id"])
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--set", choices=sorted(SETS), default="small")
+    ap.add_argument("--set", choices=sorted(BUILD), default="small")
     which = ap.parse_args().set
-    items = list(pieces(SETS[which]))
-    todo = [it for it in items if len(it[1]) <= MAX_ATOMS]
-    print(f"{len(items)} pieces, {len(items) - len(todo)} skipped for exceeding {MAX_ATOMS} atoms", flush=True)
+    items = list(BUILD[which]())
+    todo = [it for it in items if len(it[1]) <= ATOM_CAP[which]]
+    print(f"{len(items)} pieces, {len(items) - len(todo)} skipped for exceeding {ATOM_CAP[which]} atoms", flush=True)
     OUT[which].parent.mkdir(parents=True, exist_ok=True)
     rows = []
     with ThreadPoolExecutor(max_workers=8) as pool, OUT[which].open("a") as f:
-        for row in pool.map(calibrate_one, todo):
+        for row in pool.map(partial(calibrate_one, which=which), todo):
             f.write(json.dumps(row) + "\n")
             f.flush()
             rows.append(row)

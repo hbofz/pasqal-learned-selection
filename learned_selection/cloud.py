@@ -3,6 +3,8 @@
 Emulation runs on Pulser's AnalogDevice: its one calibrated layout, TriangularLatticeLayout(61, 5.0 um), has
 exactly the fresnel_61 trap ids and coordinates, and Pasqal's schedule (OMEGA, DELTA) sits inside its limits
 (max_amp 12.566, max_abs_detuning 125.66 rad/us). Its max layout filling of 0.5 caps a piece at 30 atoms.
+virtual_device() lifts that cap for pieces of 31 to 61 atoms: AnalogDevice's channels and limits with a max layout
+filling of 1.0. It has no pre-calibrated layouts, so the register is placed on AnalogDevice's layout.
 
 The real FRESNEL QPU (spec fetched 2026-10-29, data/fresnel_device.json) cannot run most pieces as they are:
 its one calibrated layout is TriangularLatticeLayout(120, 5.0 um), which contains all 61 fresnel_61 traps at
@@ -11,7 +13,7 @@ limits are also lower (max_amp 11.31, max_abs_detuning 62.83 rad/us), so piece_s
 
 Job results are bitstring -> count dicts, bit i belonging to the register's i-th qubit in insertion order, never by sorted qubit ids.
 """
-import re, subprocess
+import dataclasses, re, subprocess
 from collections import Counter
 from functools import cache
 from importlib import resources
@@ -19,7 +21,7 @@ from importlib import resources
 import networkx as nx
 from pasqal_cloud.device import EmulatorType
 from pulser import Pulse, Sequence
-from pulser.devices import AnalogDevice, Device
+from pulser.devices import AnalogDevice, Device, VirtualDevice
 from pulser.waveforms import InterpolatedWaveform
 
 from .engine import Mapping
@@ -31,6 +33,11 @@ EMULATION_DEVICE = AnalogDevice
 DURATION_NS = 4000
 OMEGA = [1e-9, 4.850055051963065, 12.566370614359172, 11.882582923954192, 1e-9]           # Pasqal's schedule
 DELTA = [-125.66370614359172, -23.735663070454464, 2.429518510655143, 13.330733571729787, 31.06390344878028]
+
+
+def virtual_device(max_atoms: int = 61) -> VirtualDevice:
+    """AnalogDevice with its layout filling cap lifted, so a piece can use up to max_atoms of the 61 traps."""
+    return dataclasses.replace(AnalogDevice.to_virtual(), max_atom_num=max_atoms, max_layout_filling=1.0)
 
 
 def client():
@@ -61,9 +68,10 @@ def _match(layout, coords) -> dict | None:
 
 
 def calibrated_layout(device: Device):
-    """The device's pre-calibrated layout that holds every fresnel_61 trap at the same coordinates."""
+    """The device's pre-calibrated layout that holds every fresnel_61 trap at the same coordinates. A device without
+    any (a VirtualDevice) uses AnalogDevice's."""
     coords = load_coords()
-    for layout in device.pre_calibrated_layouts:
+    for layout in getattr(device, "pre_calibrated_layouts", ()) or AnalogDevice.pre_calibrated_layouts:
         if _match(layout, coords):
             return layout
     raise ValueError("no pre-calibrated layout on this device contains the fresnel_61 lattice")
