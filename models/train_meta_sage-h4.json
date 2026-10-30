@@ -1,0 +1,856 @@
+{
+  "job": "sage-h4",
+  "info": {
+    "imitation_agreement": 0.9546351084812623,
+    "warm_epochs_run": 2,
+    "val_regret": 0.05128205195069313,
+    "rule_regret": 0.31065088510513306,
+    "best_epoch": 6,
+    "history": [
+      0.13116370141506195,
+      0.06903353333473206,
+      0.05917159840464592,
+      0.05719920992851257,
+      0.052268244326114655,
+      0.05128205195069313,
+      0.052268244326114655,
+      0.05621301755309105,
+      0.06114398315548897,
+      0.052268244326114655,
+      0.05719920992851257,
+      0.05719920992851257,
+      0.054240632802248,
+      0.054240632802248
+    ],
+    "epochs_run": 14,
+    "train_states": 4058,
+    "val_states": 1014,
+    "encode_seconds": 3.7380193389999476,
+    "seconds": 45.99206253200009
+  },
+  "device": "cpu",
+  "epochs": 60,
+  "commit": "6ed38d9",
+  "dataset": {
+    "train": [
+      {
+        "split": "train",
+        "shard": "0/3",
+        "instances": 160,
+        "states": 1347,
+        "settings": [
+          {
+            "setting": "er(p=0.1)",
+            "n": 60,
+            "instances": 7
+          },
+          {
+            "setting": "er(p=0.1)",
+            "n": 100,
+            "instances": 7
+          },
+          {
+            "setting": "er(p=0.1)",
+            "n": 150,
+            "instances": 6
+          },
+          {
+            "setting": "er(p=0.25)",
+            "n": 60,
+            "instances": 7
+          },
+          {
+            "setting": "er(p=0.25)",
+            "n": 100,
+            "instances": 7
+          },
+          {
+            "setting": "er(p=0.25)",
+            "n": 150,
+            "instances": 6
+          },
+          {
+            "setting": "er(p=0.75)",
+            "n": 60,
+            "instances": 7
+          },
+          {
+            "setting": "er(p=0.75)",
+            "n": 100,
+            "instances": 7
+          },
+          {
+            "setting": "er(p=0.75)",
+            "n": 150,
+            "instances": 6
+          },
+          {
+            "setting": "power_law(m=2)",
+            "n": 60,
+            "instances": 7
+          },
+          {
+            "setting": "power_law(m=2)",
+            "n": 100,
+            "instances": 7
+          },
+          {
+            "setting": "power_law(m=2)",
+            "n": 150,
+            "instances": 6
+          },
+          {
+            "setting": "power_law(m=8)",
+            "n": 60,
+            "instances": 7
+          },
+          {
+            "setting": "power_law(m=8)",
+            "n": 100,
+            "instances": 7
+          },
+          {
+            "setting": "power_law(m=8)",
+            "n": 150,
+            "instances": 6
+          },
+          {
+            "setting": "sbm(blocks=4,p_in=0.3,p_out=0.03)",
+            "n": 60,
+            "instances": 7
+          },
+          {
+            "setting": "sbm(blocks=4,p_in=0.3,p_out=0.03)",
+            "n": 100,
+            "instances": 7
+          },
+          {
+            "setting": "sbm(blocks=4,p_in=0.3,p_out=0.03)",
+            "n": 150,
+            "instances": 6
+          },
+          {
+            "setting": "factor(theta=0.2)",
+            "n": 60,
+            "instances": 7
+          },
+          {
+            "setting": "factor(theta=0.2)",
+            "n": 100,
+            "instances": 7
+          },
+          {
+            "setting": "factor(theta=0.2)",
+            "n": 150,
+            "instances": 6
+          },
+          {
+            "setting": "factor(theta=0.3)",
+            "n": 60,
+            "instances": 7
+          },
+          {
+            "setting": "factor(theta=0.3)",
+            "n": 100,
+            "instances": 7
+          },
+          {
+            "setting": "factor(theta=0.3)",
+            "n": 150,
+            "instances": 6
+          }
+        ],
+        "deferred_states": 48,
+        "dropped": [
+          {
+            "setting": "er(p=0.1)",
+            "n": 150,
+            "hook": "h2",
+            "first": true,
+            "count": 1
+          }
+        ],
+        "label_cpu_s": 4419.7421217400015,
+        "commit": "6218a4d"
+      },
+      {
+        "split": "train",
+        "shard": "1/3",
+        "instances": 160,
+        "states": 1347,
+        "settings": [
+          {
+            "setting": "er(p=0.1)",
+            "n": 60,
+            "instances": 7
+          },
+          {
+            "setting": "er(p=0.1)",
+            "n": 100,
+            "instances": 6
+          },
+          {
+            "setting": "er(p=0.1)",
+            "n": 150,
+            "instances": 7
+          },
+          {
+            "setting": "er(p=0.25)",
+            "n": 60,
+            "instances": 7
+          },
+          {
+            "setting": "er(p=0.25)",
+            "n": 100,
+            "instances": 6
+          },
+          {
+            "setting": "er(p=0.25)",
+            "n": 150,
+            "instances": 7
+          },
+          {
+            "setting": "er(p=0.75)",
+            "n": 60,
+            "instances": 7
+          },
+          {
+            "setting": "er(p=0.75)",
+            "n": 100,
+            "instances": 6
+          },
+          {
+            "setting": "er(p=0.75)",
+            "n": 150,
+            "instances": 7
+          },
+          {
+            "setting": "power_law(m=2)",
+            "n": 60,
+            "instances": 7
+          },
+          {
+            "setting": "power_law(m=2)",
+            "n": 100,
+            "instances": 6
+          },
+          {
+            "setting": "power_law(m=2)",
+            "n": 150,
+            "instances": 7
+          },
+          {
+            "setting": "power_law(m=8)",
+            "n": 60,
+            "instances": 7
+          },
+          {
+            "setting": "power_law(m=8)",
+            "n": 100,
+            "instances": 6
+          },
+          {
+            "setting": "power_law(m=8)",
+            "n": 150,
+            "instances": 7
+          },
+          {
+            "setting": "sbm(blocks=4,p_in=0.3,p_out=0.03)",
+            "n": 60,
+            "instances": 7
+          },
+          {
+            "setting": "sbm(blocks=4,p_in=0.3,p_out=0.03)",
+            "n": 100,
+            "instances": 6
+          },
+          {
+            "setting": "sbm(blocks=4,p_in=0.3,p_out=0.03)",
+            "n": 150,
+            "instances": 7
+          },
+          {
+            "setting": "factor(theta=0.2)",
+            "n": 60,
+            "instances": 7
+          },
+          {
+            "setting": "factor(theta=0.2)",
+            "n": 100,
+            "instances": 6
+          },
+          {
+            "setting": "factor(theta=0.2)",
+            "n": 150,
+            "instances": 7
+          },
+          {
+            "setting": "factor(theta=0.3)",
+            "n": 60,
+            "instances": 7
+          },
+          {
+            "setting": "factor(theta=0.3)",
+            "n": 100,
+            "instances": 6
+          },
+          {
+            "setting": "factor(theta=0.3)",
+            "n": 150,
+            "instances": 7
+          }
+        ],
+        "deferred_states": 56,
+        "dropped": [],
+        "label_cpu_s": 5027.106485846997,
+        "commit": "6218a4d"
+      },
+      {
+        "split": "train",
+        "shard": "2/3",
+        "instances": 160,
+        "states": 1364,
+        "settings": [
+          {
+            "setting": "er(p=0.1)",
+            "n": 60,
+            "instances": 6
+          },
+          {
+            "setting": "er(p=0.1)",
+            "n": 100,
+            "instances": 7
+          },
+          {
+            "setting": "er(p=0.1)",
+            "n": 150,
+            "instances": 7
+          },
+          {
+            "setting": "er(p=0.25)",
+            "n": 60,
+            "instances": 6
+          },
+          {
+            "setting": "er(p=0.25)",
+            "n": 100,
+            "instances": 7
+          },
+          {
+            "setting": "er(p=0.25)",
+            "n": 150,
+            "instances": 7
+          },
+          {
+            "setting": "er(p=0.75)",
+            "n": 60,
+            "instances": 6
+          },
+          {
+            "setting": "er(p=0.75)",
+            "n": 100,
+            "instances": 7
+          },
+          {
+            "setting": "er(p=0.75)",
+            "n": 150,
+            "instances": 7
+          },
+          {
+            "setting": "power_law(m=2)",
+            "n": 60,
+            "instances": 6
+          },
+          {
+            "setting": "power_law(m=2)",
+            "n": 100,
+            "instances": 7
+          },
+          {
+            "setting": "power_law(m=2)",
+            "n": 150,
+            "instances": 7
+          },
+          {
+            "setting": "power_law(m=8)",
+            "n": 60,
+            "instances": 6
+          },
+          {
+            "setting": "power_law(m=8)",
+            "n": 100,
+            "instances": 7
+          },
+          {
+            "setting": "power_law(m=8)",
+            "n": 150,
+            "instances": 7
+          },
+          {
+            "setting": "sbm(blocks=4,p_in=0.3,p_out=0.03)",
+            "n": 60,
+            "instances": 6
+          },
+          {
+            "setting": "sbm(blocks=4,p_in=0.3,p_out=0.03)",
+            "n": 100,
+            "instances": 7
+          },
+          {
+            "setting": "sbm(blocks=4,p_in=0.3,p_out=0.03)",
+            "n": 150,
+            "instances": 7
+          },
+          {
+            "setting": "factor(theta=0.2)",
+            "n": 60,
+            "instances": 6
+          },
+          {
+            "setting": "factor(theta=0.2)",
+            "n": 100,
+            "instances": 7
+          },
+          {
+            "setting": "factor(theta=0.2)",
+            "n": 150,
+            "instances": 7
+          },
+          {
+            "setting": "factor(theta=0.3)",
+            "n": 60,
+            "instances": 6
+          },
+          {
+            "setting": "factor(theta=0.3)",
+            "n": 100,
+            "instances": 7
+          },
+          {
+            "setting": "factor(theta=0.3)",
+            "n": 150,
+            "instances": 7
+          }
+        ],
+        "deferred_states": 56,
+        "dropped": [
+          {
+            "setting": "er(p=0.1)",
+            "n": 150,
+            "hook": "h2",
+            "first": true,
+            "count": 1
+          }
+        ],
+        "label_cpu_s": 6046.809339010998,
+        "commit": "6218a4d"
+      }
+    ],
+    "val": [
+      {
+        "split": "val",
+        "shard": "0/3",
+        "instances": 40,
+        "states": 334,
+        "settings": [
+          {
+            "setting": "er(p=0.1)",
+            "n": 60,
+            "instances": 2
+          },
+          {
+            "setting": "er(p=0.1)",
+            "n": 100,
+            "instances": 2
+          },
+          {
+            "setting": "er(p=0.1)",
+            "n": 150,
+            "instances": 1
+          },
+          {
+            "setting": "er(p=0.25)",
+            "n": 60,
+            "instances": 2
+          },
+          {
+            "setting": "er(p=0.25)",
+            "n": 100,
+            "instances": 2
+          },
+          {
+            "setting": "er(p=0.25)",
+            "n": 150,
+            "instances": 1
+          },
+          {
+            "setting": "er(p=0.75)",
+            "n": 60,
+            "instances": 2
+          },
+          {
+            "setting": "er(p=0.75)",
+            "n": 100,
+            "instances": 2
+          },
+          {
+            "setting": "er(p=0.75)",
+            "n": 150,
+            "instances": 1
+          },
+          {
+            "setting": "power_law(m=2)",
+            "n": 60,
+            "instances": 2
+          },
+          {
+            "setting": "power_law(m=2)",
+            "n": 100,
+            "instances": 2
+          },
+          {
+            "setting": "power_law(m=2)",
+            "n": 150,
+            "instances": 1
+          },
+          {
+            "setting": "power_law(m=8)",
+            "n": 60,
+            "instances": 2
+          },
+          {
+            "setting": "power_law(m=8)",
+            "n": 100,
+            "instances": 2
+          },
+          {
+            "setting": "power_law(m=8)",
+            "n": 150,
+            "instances": 1
+          },
+          {
+            "setting": "sbm(blocks=4,p_in=0.3,p_out=0.03)",
+            "n": 60,
+            "instances": 2
+          },
+          {
+            "setting": "sbm(blocks=4,p_in=0.3,p_out=0.03)",
+            "n": 100,
+            "instances": 2
+          },
+          {
+            "setting": "sbm(blocks=4,p_in=0.3,p_out=0.03)",
+            "n": 150,
+            "instances": 1
+          },
+          {
+            "setting": "factor(theta=0.2)",
+            "n": 60,
+            "instances": 2
+          },
+          {
+            "setting": "factor(theta=0.2)",
+            "n": 100,
+            "instances": 2
+          },
+          {
+            "setting": "factor(theta=0.2)",
+            "n": 150,
+            "instances": 1
+          },
+          {
+            "setting": "factor(theta=0.3)",
+            "n": 60,
+            "instances": 2
+          },
+          {
+            "setting": "factor(theta=0.3)",
+            "n": 100,
+            "instances": 2
+          },
+          {
+            "setting": "factor(theta=0.3)",
+            "n": 150,
+            "instances": 1
+          }
+        ],
+        "deferred_states": 8,
+        "dropped": [],
+        "label_cpu_s": 535.0020096659999,
+        "commit": "6218a4d"
+      },
+      {
+        "split": "val",
+        "shard": "1/3",
+        "instances": 40,
+        "states": 329,
+        "settings": [
+          {
+            "setting": "er(p=0.1)",
+            "n": 60,
+            "instances": 2
+          },
+          {
+            "setting": "er(p=0.1)",
+            "n": 100,
+            "instances": 1
+          },
+          {
+            "setting": "er(p=0.1)",
+            "n": 150,
+            "instances": 2
+          },
+          {
+            "setting": "er(p=0.25)",
+            "n": 60,
+            "instances": 2
+          },
+          {
+            "setting": "er(p=0.25)",
+            "n": 100,
+            "instances": 1
+          },
+          {
+            "setting": "er(p=0.25)",
+            "n": 150,
+            "instances": 2
+          },
+          {
+            "setting": "er(p=0.75)",
+            "n": 60,
+            "instances": 2
+          },
+          {
+            "setting": "er(p=0.75)",
+            "n": 100,
+            "instances": 1
+          },
+          {
+            "setting": "er(p=0.75)",
+            "n": 150,
+            "instances": 2
+          },
+          {
+            "setting": "power_law(m=2)",
+            "n": 60,
+            "instances": 2
+          },
+          {
+            "setting": "power_law(m=2)",
+            "n": 100,
+            "instances": 1
+          },
+          {
+            "setting": "power_law(m=2)",
+            "n": 150,
+            "instances": 2
+          },
+          {
+            "setting": "power_law(m=8)",
+            "n": 60,
+            "instances": 2
+          },
+          {
+            "setting": "power_law(m=8)",
+            "n": 100,
+            "instances": 1
+          },
+          {
+            "setting": "power_law(m=8)",
+            "n": 150,
+            "instances": 2
+          },
+          {
+            "setting": "sbm(blocks=4,p_in=0.3,p_out=0.03)",
+            "n": 60,
+            "instances": 2
+          },
+          {
+            "setting": "sbm(blocks=4,p_in=0.3,p_out=0.03)",
+            "n": 100,
+            "instances": 1
+          },
+          {
+            "setting": "sbm(blocks=4,p_in=0.3,p_out=0.03)",
+            "n": 150,
+            "instances": 2
+          },
+          {
+            "setting": "factor(theta=0.2)",
+            "n": 60,
+            "instances": 2
+          },
+          {
+            "setting": "factor(theta=0.2)",
+            "n": 100,
+            "instances": 1
+          },
+          {
+            "setting": "factor(theta=0.2)",
+            "n": 150,
+            "instances": 2
+          },
+          {
+            "setting": "factor(theta=0.3)",
+            "n": 60,
+            "instances": 2
+          },
+          {
+            "setting": "factor(theta=0.3)",
+            "n": 100,
+            "instances": 1
+          },
+          {
+            "setting": "factor(theta=0.3)",
+            "n": 150,
+            "instances": 2
+          }
+        ],
+        "deferred_states": 16,
+        "dropped": [],
+        "label_cpu_s": 1701.501296416,
+        "commit": "6218a4d"
+      },
+      {
+        "split": "val",
+        "shard": "2/3",
+        "instances": 40,
+        "states": 351,
+        "settings": [
+          {
+            "setting": "er(p=0.1)",
+            "n": 60,
+            "instances": 1
+          },
+          {
+            "setting": "er(p=0.1)",
+            "n": 100,
+            "instances": 2
+          },
+          {
+            "setting": "er(p=0.1)",
+            "n": 150,
+            "instances": 2
+          },
+          {
+            "setting": "er(p=0.25)",
+            "n": 60,
+            "instances": 1
+          },
+          {
+            "setting": "er(p=0.25)",
+            "n": 100,
+            "instances": 2
+          },
+          {
+            "setting": "er(p=0.25)",
+            "n": 150,
+            "instances": 2
+          },
+          {
+            "setting": "er(p=0.75)",
+            "n": 60,
+            "instances": 1
+          },
+          {
+            "setting": "er(p=0.75)",
+            "n": 100,
+            "instances": 2
+          },
+          {
+            "setting": "er(p=0.75)",
+            "n": 150,
+            "instances": 2
+          },
+          {
+            "setting": "power_law(m=2)",
+            "n": 60,
+            "instances": 1
+          },
+          {
+            "setting": "power_law(m=2)",
+            "n": 100,
+            "instances": 2
+          },
+          {
+            "setting": "power_law(m=2)",
+            "n": 150,
+            "instances": 2
+          },
+          {
+            "setting": "power_law(m=8)",
+            "n": 60,
+            "instances": 1
+          },
+          {
+            "setting": "power_law(m=8)",
+            "n": 100,
+            "instances": 2
+          },
+          {
+            "setting": "power_law(m=8)",
+            "n": 150,
+            "instances": 2
+          },
+          {
+            "setting": "sbm(blocks=4,p_in=0.3,p_out=0.03)",
+            "n": 60,
+            "instances": 1
+          },
+          {
+            "setting": "sbm(blocks=4,p_in=0.3,p_out=0.03)",
+            "n": 100,
+            "instances": 2
+          },
+          {
+            "setting": "sbm(blocks=4,p_in=0.3,p_out=0.03)",
+            "n": 150,
+            "instances": 2
+          },
+          {
+            "setting": "factor(theta=0.2)",
+            "n": 60,
+            "instances": 1
+          },
+          {
+            "setting": "factor(theta=0.2)",
+            "n": 100,
+            "instances": 2
+          },
+          {
+            "setting": "factor(theta=0.2)",
+            "n": 150,
+            "instances": 2
+          },
+          {
+            "setting": "factor(theta=0.3)",
+            "n": 60,
+            "instances": 1
+          },
+          {
+            "setting": "factor(theta=0.3)",
+            "n": 100,
+            "instances": 2
+          },
+          {
+            "setting": "factor(theta=0.3)",
+            "n": 150,
+            "instances": 2
+          }
+        ],
+        "deferred_states": 16,
+        "dropped": [
+          {
+            "setting": "er(p=0.1)",
+            "n": 150,
+            "hook": "h2",
+            "first": true,
+            "count": 1
+          }
+        ],
+        "label_cpu_s": 2002.281573234,
+        "commit": "6218a4d"
+      }
+    ]
+  }
+}
