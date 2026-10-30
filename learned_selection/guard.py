@@ -35,36 +35,46 @@ def _equal(a, b) -> bool:
 
 def _rerun(inst, old, methods, models_dir):
     """(same, differ, missing, messages) of one instance: each method with old beam records on it is rerun at
-    the widths and restart counts found in them."""
+    the widths found in them, one run per restart count, so exactly the old keys are rerun."""
     ik, same, differ, missing, msgs = _instance_key(*inst), 0, 0, 0, []
     for m in methods:
         keys = [k for k in old if k[:5] == (*ik, m)]
         if not keys:
             missing += 1
             continue
-        rows = run_instance(*inst, [m], widths=sorted({k[5:8] for k in keys}), restarts=sorted({k[8] for k in keys}),
-                            time_limit_s=old[keys[0]]["time_limit_s"], models_dir=models_dir)
-        for r in rows:
-            key = (*ik, m, r["k"], r["s"], r["l"], r["restarts"])
-            if key not in old:
-                missing += 1
-                continue
-            bad = [f"{f} {old[key][f]} -> {r[f]}" for f in COMPARED if old[key][f] != r[f]]
-            same += not bad
-            differ += bool(bad)
-            msgs += [f"differ {key}: {', '.join(bad)}"] * bool(bad)
+        for r in sorted({k[8] for k in keys}):
+            rows = run_instance(*inst, [m], widths=sorted(k[5:8] for k in keys if k[8] == r), restarts=[r],
+                                time_limit_s=old[keys[0]]["time_limit_s"], models_dir=models_dir)
+            for row in rows:
+                key = (*ik, m, row["k"], row["s"], row["l"], row["restarts"])
+                bad = [f"{f} {old[key][f]} -> {row[f]}" for f in COMPARED if old[key][f] != row[f]]
+                if bad:
+                    differ += 1
+                    msgs.append(f"differ {key}: {', '.join(bad)}")
+                else:
+                    same += 1
     return same, differ, missing, msgs
 
 
 def records_guard(paths, methods, instances, workers, models_dir) -> tuple[int, int, int]:
-    """(same, differ, missing): missing counts a method with no old record on an instance, and a rerun with
-    no old record to compare to."""
-    lines = (line for p in paths for line in Path(p).read_text().splitlines() if line.strip())
-    old = {(*_instance_key(r["family"], r["params"], r["n"], r["seed"]), r["method"], r["k"], r["s"], r["l"],
-            r["restarts"]): r for r in map(json.loads, lines) if r["k"] is not None}
+    """(same, differ, missing): missing counts a method with no old record on an instance. Two records with one
+    key that disagree on a compared field are a conflict and count as differ."""
+    old, conflicts = {}, []
+    for p in paths:
+        for line in Path(p).read_text().splitlines():
+            r = json.loads(line) if line.strip() else {"k": None}
+            if r["k"] is None:
+                continue
+            key = (*_instance_key(r["family"], r["params"], r["n"], r["seed"]), r["method"], r["k"], r["s"], r["l"],
+                   r["restarts"])
+            if key in old and any(old[key][f] != r[f] for f in COMPARED):
+                conflicts.append(f"conflict {key}: {p} disagrees with an earlier record")
+            old.setdefault(key, r)
     out = _map(partial(_rerun, old=old, methods=methods, models_dir=models_dir), instances, workers)
-    print(*(m for o in out for m in o[3]), sep="\n", end="\n" if any(o[3] for o in out) else "")
-    return tuple(sum(o[i] for o in out) for i in range(3))
+    for msg in conflicts + [m for o in out for m in o[3]]:
+        print(msg)
+    same, differ, missing = (sum(o[i] for o in out) for i in range(3))
+    return same, differ + len(conflicts), missing
 
 
 def _relabel(job):
@@ -86,7 +96,8 @@ def labels_guard(paths, instances, workers) -> tuple[int, int]:
     for r in _states(paths):
         old.setdefault((r["setting"], r["instance_n"], r["seed"]), []).append(r)
     out = _map(_relabel, [(i, old.get((_setting_name(i[0], i[1]), i[2], i[3]), [])) for i in instances], workers)
-    print(*(m for o in out for m in o[2]), sep="\n", end="\n" if any(o[2] for o in out) else "")
+    for msg in (m for o in out for m in o[2]):
+        print(msg)
     return sum(o[0] for o in out), sum(o[1] for o in out)
 
 
@@ -102,18 +113,20 @@ def main(argv=None) -> None:
     ap.add_argument("--workers", type=int, default=1)
     a = ap.parse_args(argv)
     same = differ = missing = 0
+    empty = False                                  # a part that was asked for and compared nothing
     if a.records:
         insts = grid("test")[::a.stride][:a.count] + grid("val")[:2]
         paths = sorted(p for g in a.records for p in glob(g))
         same, differ, missing = records_guard(paths, a.methods.split(","), insts, a.workers, a.models)
+        empty = same == 0
     if a.labels:
         paths, by_name = sorted(p for g in a.labels for p in glob(g)), {_setting_name(*s): s for s in TRAIN_SETTINGS}
         seen = sorted({(r["setting"], r["instance_n"], r["seed"]) for r in _states(paths)})
         insts = [(*by_name[s], n, seed) for s, n, seed in seen if s in by_name]
         s, d = labels_guard(paths, insts[::max(1, len(insts) // a.label_count)][:a.label_count], a.workers)
-        same, differ = same + s, differ + d
+        same, differ, empty = same + s, differ + d, empty or s == 0
     print(f"guard: {same} same, {differ} differ, {missing} missing")
-    sys.exit(1 if differ else 0)
+    sys.exit(1 if differ or empty else 0)
 
 
 if __name__ == "__main__":
