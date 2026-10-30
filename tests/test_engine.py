@@ -1,6 +1,7 @@
 import contextlib, io, itertools, networkx as nx, pytest
-from learned_selection.engine import (run_code_faithful, run_beam, code_prune, gls_generator, vendored_gls_generator,
-                                      pasqal_greedy_piece_solver, exact_piece_solver)
+from learned_selection.engine import (run_code_faithful, run_code_bounded, run_beam, code_prune, gls_generator,
+                                      vendored_gls_generator, pasqal_greedy_piece_solver, exact_piece_solver,
+                                      best_of_restarts)
 from learned_selection.instances import erdos_renyi
 from learned_selection.lattice import load_coords
 from learned_selection.solvers import exact_mis, is_independent, min_degree_greedy
@@ -91,9 +92,33 @@ def test_engine_refuses_beam_explosion():
         run_beam(G, gls_generator(), exact_piece_solver, 4, 2, code_prune(4, 10), max_branches=50)
 
 def test_engine_accepts_short_solver_output():
-    one = lambda piece, m, s: exact_piece_solver(piece, m, 1)
-    r = run_code_faithful(erdos_renyi(40, 0.25, 1), 4, 3, 10, solve=one)
-    assert is_independent(erdos_renyi(40, 0.25, 1), r.solution)
+    seen, inner = [], code_prune(4, 10)
+    def prune(level, children):
+        seen.append(children)
+        return inner(level, children)
+    G = erdos_renyi(40, 0.25, 1)
+    r = run_beam(G, gls_generator(), lambda piece, m, s: exact_piece_solver(piece, m, 1), 4, 3, prune)
+    assert is_independent(G, r.solution) and sum(seen) == r.pasqal_runs   # one child per solver call
+
+def test_count_small_prunes_on_small_children():
+    level = [(None, [0] * i) for i in range(5)]
+    assert [len(b[1]) for b in code_prune(2, 3, count_small=True)(level, 0)] == [4, 3]
+    assert code_prune(2, 3)(level, 0) == level
+
+def test_bounded_loop_survives_isolated_vertices():
+    G = nx.empty_graph(40)
+    nx.set_node_attributes(G, 1, "weight")
+    with pytest.raises(RuntimeError, match="beam exploded"):
+        run_code_faithful(G, 4, 2, 10, max_branches=50)
+    assert run_code_bounded(G, 4, 2, 10, max_branches=50).size == 40
+
+def test_run_sizes_account_for_every_run():
+    G = erdos_renyi(60, 0.25, 0)
+    r = run_code_bounded(G, 4, 2, 10)
+    assert len(r.run_sizes) == r.quantum_runs and sum(x > 5 for x in r.run_sizes) == r.pasqal_runs
+    assert sum(x for x in r.run_sizes if x > 5) == r.atoms
+    b = best_of_restarts(lambda i: run_code_bounded(G, 4, 2, 10, seed=i), 2)
+    assert len(b.run_sizes) == b.quantum_runs
 
 GAP_CASES = list(itertools.product([30, 40], range(6), ["drop0", "drop3711", "shift100"]))
 

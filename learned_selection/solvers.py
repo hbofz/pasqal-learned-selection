@@ -64,7 +64,8 @@ def top_maximal_sets(graph: nx.Graph, s: int) -> list[frozenset]:
         status = solver.Solve(m)
         if status == cp_model.INFEASIBLE:
             break
-        assert status == cp_model.OPTIMAL, f"piece solve not optimal: {solver.StatusName(status)}"
+        if status != cp_model.OPTIMAL:
+            raise RuntimeError(f"piece solve not optimal: {solver.StatusName(status)}")
         chosen = [i for i in range(len(nodes)) if solver.Value(x[i])]
         out.append(frozenset(nodes[i] for i in chosen))
         others = [x[i] for i in range(len(nodes)) if i not in set(chosen)]
