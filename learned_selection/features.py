@@ -60,3 +60,17 @@ def piece_features(g: nx.Graph, maps: list[dict]) -> np.ndarray:
     sizes = X[:, 0]
     X[:, 10] = (len(maps) - np.searchsorted(np.sort(sizes), sizes, side="right")) / max(1, len(maps))
     return X
+
+
+GRAPH_FEATURES = ["n", "edges", "density", "caro_wei", "isolated", "deg_max", "deg_mean", "deg_std", "core_mean",
+                  "core_max"]
+
+
+def graph_features(g: nx.Graph) -> np.ndarray:
+    """A vector of len(GRAPH_FEATURES) raw counts and means over a graph, zeros on the empty graph. caro_wei is
+    the sum over vertices of 1 / (degree + 1), a closed form in the degrees."""
+    deg = np.array([d for _, d in g.degree()], dtype=np.float64)
+    core = np.array(list(nx.core_number(g).values()), dtype=np.float64)
+    f = lambda a, op: float(op(a)) if len(a) else 0.0
+    return np.array([len(g), g.number_of_edges(), nx.density(g), f(1 / (deg + 1), np.sum), float((deg == 0).sum()),
+                     f(deg, np.max), f(deg, np.mean), f(deg, np.std), f(core, np.mean), f(core, np.max)])

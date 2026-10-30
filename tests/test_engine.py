@@ -180,3 +180,49 @@ def test_engine_rejects_bad_solver_output(kind):
 def test_engine_rejects_empty_generator_output():
     with pytest.raises(ValueError):
         run_beam(erdos_renyi(40, 0.25, 0), lambda g, k: [{}], exact_piece_solver, 4, 2, code_prune(4, 10))
+
+
+def test_value_prune_sorts_by_partial_size_plus_value():
+    level = [(nx.empty_graph(n), [0] * s) for n, s in ((5, 3), (1, 1), (9, 2), (0, 4))]
+    calls = []
+    def value(graphs):
+        calls.append(len(graphs))
+        return [len(g) / 2 for g in graphs]            # keys 5.5, 1.5, 6.5, 4.0
+    kept = code_prune(2, 0, value=value)(level, 1)
+    assert [len(g) for g, _ in kept] == [9, 5] and calls == [4]
+
+def test_value_prune_with_zero_value_keeps_the_default_order():
+    level = [(nx.empty_graph(i), [0] * (i % 3)) for i in range(7)]
+    zero = lambda graphs: [0.0] * len(graphs)
+    assert code_prune(3, 2, count_small=True, value=zero)(level, 0) == code_prune(3, 2, count_small=True)(level, 0)
+
+def test_value_is_only_called_when_pruning_fires():
+    calls = []
+    prune = code_prune(2, 10, count_small=True, value=lambda gs: calls.append(len(gs)) or [0.0] * len(gs))
+    level = [(nx.empty_graph(1), [0])] * 4
+    prune(level, 0); prune(level, 0)                   # counter 4, then 8
+    assert calls == []
+    prune(level, 0)                                    # 12 > 10
+    assert calls == [4]
+    prune(level[:2], 0); prune(level[:2], 0); prune(level[:2], 0); prune(level[:2], 0); prune(level[:2], 0); prune(level[:2], 0)
+    assert calls == [4]                                # fired at 12 > 10 again, but 2 branches <= k: nothing to choose
+
+def test_zero_value_reproduces_bounded_runs():
+    zero = lambda graphs: [0.0] * len(graphs)
+    for seed in range(3):
+        G = erdos_renyi(80, 0.15, seed)
+        a, b = run_code_bounded(G, 4, 2, 10), run_code_bounded(G, 4, 2, 10, value=zero)
+        assert (a.solution, a.quantum_runs, a.pasqal_runs, a.atoms) == (b.solution, b.quantum_runs, b.pasqal_runs, b.atoms)
+
+def test_exact_value_prune_changes_some_runs():
+    # with the exact independence number as the value, pruning keeps different branches on some instance
+    exact = lambda graphs: [len(exact_mis(g, 10, 1)[0]) for g in graphs]
+    runs = [(run_code_bounded(G, 4, 2, 10), run_code_bounded(G, 4, 2, 10, value=exact))
+            for G in (erdos_renyi(60, 0.1, s) for s in range(4))]
+    assert any((a.solution, a.quantum_runs) != (b.solution, b.quantum_runs) for a, b in runs)
+
+
+def test_value_hook_returning_too_few_scores_fails_loudly():
+    level = [(nx.empty_graph(2), [0] * i) for i in range(5)]
+    with pytest.raises(ValueError):
+        code_prune(2, 3, value=lambda graphs: [0.0] * (len(graphs) - 1))(level, 5)

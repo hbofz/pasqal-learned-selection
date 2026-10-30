@@ -21,6 +21,7 @@ PieceSolver = Callable[[nx.Graph, Mapping, int], list[frozenset]]  # (piece, map
 Branch = tuple[nx.Graph, list]                                   # (remaining graph, partial solution)
 Pruner = Callable[[list[Branch], int], list[Branch]]             # (next level, solver children) -> kept
 Rank = Callable[[nx.Graph, list[Mapping]], Sequence[float]]      # (current graph, candidate pieces) -> one rank each
+Value = Callable[[list[nx.Graph]], Sequence[float]]              # remaining graphs of a level -> predicted value-to-go each
 
 
 @dataclass
@@ -90,9 +91,11 @@ def exact_piece_solver(piece: nx.Graph, mapping: Mapping, s: int) -> list[frozen
     return top_maximal_sets(piece, s)
 
 
-def code_prune(k: int, l: int, count_small: bool = False) -> Pruner:
+def code_prune(k: int, l: int, count_small: bool = False, value: Value | None = None) -> Pruner:
     """Pasqal's code: prune to k only once the running count of solver children passes l.
-    With count_small every child counts, so levels made of small pieces still get pruned."""
+    With count_small every child counts, so levels made of small pieces still get pruned.
+    With `value`, a pruning level of more than k branches keeps the k with the largest partial size plus
+    predicted value of the remaining graph, instead of the largest partial size."""
     counter = 0
 
     def prune(level: list[Branch], children: int) -> list[Branch]:
@@ -100,6 +103,9 @@ def code_prune(k: int, l: int, count_small: bool = False) -> Pruner:
         counter += len(level) if count_small else children
         if counter > l:
             counter = 0
+            if value is not None and len(level) > k:
+                keys = [len(sol) + v for (_, sol), v in zip(level, value([g for g, _ in level]), strict=True)]
+                return [level[i] for i in sorted(range(len(level)), key=keys.__getitem__, reverse=True)[:k]]
             return sorted(level, key=lambda b: len(b[1]), reverse=True)[:k]
         return level
     return prune
@@ -184,11 +190,11 @@ def run_code_faithful(graph: nx.Graph, k: int, s: int, l: int, solve: PieceSolve
 
 def run_code_bounded(graph: nx.Graph, k: int, s: int, l: int, score: VertexScore | None = None,
                      rank: Rank | None = None, solve: PieceSolver = exact_piece_solver, seed: int = 0,
-                     small: int = 5, max_branches: int = 1_000) -> RunResult:
+                     small: int = 5, max_branches: int = 1_000, value: Value | None = None) -> RunResult:
     """The code loop with a pruner that also counts small-piece children, so graphs that split into many
-    small pieces (isolated vertices, say) stay bounded. `score` and `rank` are the generator's hooks."""
+    small pieces (isolated vertices, say) stay bounded. `score` and `rank` are the generator's hooks, `value` the pruner's."""
     return run_beam(graph, gls_generator(seed=seed, score=score, rank=rank), solve, k, s,
-                    code_prune(k, l, count_small=True), small, max_branches)
+                    code_prune(k, l, count_small=True, value=value), small, max_branches)
 
 
 class CenterSeededMapping(GreedyMapping):

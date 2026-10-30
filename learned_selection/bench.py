@@ -7,7 +7,7 @@
 Records are appended as each instance finishes. A rerun skips every (instance, method) already in --out, so an
 interrupted grid resumes; widths and restarts are not part of that check, so use a new --out to change them.
 """
-import argparse, json, subprocess, sys, time
+import argparse, json, re, sys, time
 from contextlib import nullcontext
 from functools import cache, partial
 from multiprocessing import Pool
@@ -16,18 +16,28 @@ from typing import Callable
 
 import networkx as nx
 
+from . import dataset
 from .engine import RunResult, _remove_closed, best_of_restarts, run_code_bounded, run_code_faithful, run_paper_faithful
 from .instances import (BIG_N, BIG_SETTINGS, HELD_OUT_SETTINGS, TEST_SEEDS, TEST_SIZES, TRAIN_SETTINGS, VAL_SEEDS,
                         make)
 from .lattice import BLOCKADE_UM
-from .models import h2_score, h4_rank, load, load_theta, theta_score
+from .models import h2_score, h4_rank, linear_value, load, load_theta, theta_score
 from .solvers import exact_mis, is_independent, min_degree_greedy
 from .vendored import weighted_greedy_independent_set
 
+NEW_METHODS = ["gin-h2", "sage-h2", "gat-h2", "gin-h4", "sage-h4", "gat-h4", "gin-h2h4", "sage-h2h4", "gat-h2h4",
+               "lin-h2+gin-h4", "lin-h2+sage-h4", "lin-h2+gat-h4", "lin-h5", "gin-h5", "sage-h5", "gat-h5",
+               "lin-h2h4+lin-h5", "lin-h2h4+gin-h5", "lin-h2h4+sage-h5", "lin-h2h4+gat-h5", "gin-h2h4h5"]
+# Value pruning by the true optimum of each remaining graph: a reference that computes independent sets outside the
+# counted solves, so it is its own track. Validation grid only, and run only when named.
+ORACLE_METHODS = ["exact-h5", "lin-h2h4+exact-h5"]
 BEAM_METHODS = ["gls-code", "gls", "gls-paper", "gls-screen", "lin-h2", "lin-h4", "lin-h2h4", "lgb-h2", "lgb-h4",
-                "lgb-h2h4", "cma-h2"]
+                "lgb-h2h4", "cma-h2"] + NEW_METHODS + ORACLE_METHODS
 CLASSICAL_METHODS = ["greedy-pasqal", "greedy-mindeg", "exact"]
-TRACKS = {**{m: "structure" for m in BEAM_METHODS}, "gls-screen": "hybrid", **{m: "classical" for m in CLASSICAL_METHODS}}
+TRACKS = {**{m: "oracle" if "exact" in m else "structure" for m in BEAM_METHODS}, "gls-screen": "hybrid",
+          **{m: "classical" for m in CLASSICAL_METHODS}}
+KIND_EXT = {"lin": ".json", "lgb": ".txt", "gin": ".pt", "sage": ".pt", "gat": ".pt"}
+GNN_KINDS = ("gin", "sage", "gat")
 MINDEG_SEEDS = 20
 SMALL = 5
 COSTS = ("quantum_runs", "pasqal_runs", "atoms", "rounds", "classical_s", "solver_s", "max_atoms", "over_30",
@@ -38,10 +48,7 @@ def gap_pct(size: int, best: int) -> float:
     return 0.0 if best == 0 else 100 * (best - size) / best
 
 
-@cache
-def _commit() -> str:
-    return subprocess.run(["git", "describe", "--always", "--dirty"], capture_output=True, text=True,
-                          cwd=Path(__file__).parent).stdout.strip()
+_commit = cache(dataset._commit)
 
 
 def screen_rank(g: nx.Graph, maps: list[dict]) -> list[int]:
@@ -53,9 +60,63 @@ def screen_rank(g: nx.Graph, maps: list[dict]) -> list[int]:
 
 
 @cache
+def _gnn_loader():
+    """load_gnn, with torch set to one thread, the first time a process needs a graph network."""
+    # Imported here, not at the top: torch and lightgbm cannot share a process on macOS (OMP error or segfault), and
+    # the linear and LightGBM methods should not need torch.
+    import torch
+    from .gnn import load_gnn
+    torch.set_num_threads(1)
+    return load_gnn
+
+
+@cache
 def _model(path: Path):
     """Each model file is read once per process."""
+    if path.suffix == ".pt":
+        return _gnn_loader()(path)
     return load_theta(path) if path.name.startswith("cma-") else load(path)
+
+
+def parse_method(name: str) -> list[tuple[str, str]]:
+    """"lin-h2h4+gin-h5" -> [("lin", "h2"), ("lin", "h4"), ("gin", "h5")]: one (kind, hook) per hook, in the order
+    written. Raises ValueError on an unknown kind, a malformed or repeated hook, lgb with h5 (there is no LightGBM
+    value model), or exact with any hook but h5."""
+    out = []
+    for part in name.split("+"):
+        kind, _, hooks = part.partition("-")
+        if kind != "exact" and kind not in KIND_EXT:
+            raise ValueError(f"{name!r}: unknown model kind {kind!r}")
+        found = re.fullmatch(r"(h2)?(h4)?(h5)?", hooks)
+        if not hooks or not found:
+            raise ValueError(f"{name!r}: hooks must be one or more of h2, h4, h5 in that order, got {hooks!r}")
+        for hook in filter(None, found.groups()):
+            if (kind == "lgb" and hook == "h5") or (kind == "exact" and hook != "h5"):
+                raise ValueError(f"{name!r}: no {kind} model for {hook}")
+            if hook in (h for _, h in out):
+                raise ValueError(f"{name!r}: {hook} given twice")
+            out.append((kind, hook))
+    return out
+
+
+def exact_value(graphs: list[nx.Graph]) -> list[int]:
+    """The true independence number of each graph."""
+    return [len(exact_mis(g, 10.0, workers=1)[0]) for g in graphs]
+
+
+def _hook(kind: str, hook: str, d: Path):
+    """The (run_code_bounded keyword, callable) for one hook of one model kind."""
+    keyword = {"h2": "score", "h4": "rank", "h5": "value"}[hook]
+    if kind == "exact":
+        return keyword, exact_value
+    model = _model(d / f"{kind}-{hook}{KIND_EXT[kind]}")
+    if kind in GNN_KINDS:
+        from . import gnn     # torch is already loaded: the model above is a .pt file
+        head = {"h2": "vertex", "h4": "piece", "h5": "value"}[hook]
+        if model.head != head:
+            raise ValueError(f"{kind}-{hook}.pt has a {model.head!r} head, but hook {hook} needs a {head!r} head")
+        return keyword, {"h2": gnn.gnn_score, "h4": gnn.gnn_rank, "h5": gnn.gnn_value}[hook](model)
+    return keyword, {"h2": h2_score, "h4": h4_rank, "h5": linear_value}[hook](model)
 
 
 def method_runner(name: str, models_dir, max_branches: int = 1_000) -> Callable[[nx.Graph, int, int, int, int], RunResult]:
@@ -73,12 +134,7 @@ def method_runner(name: str, models_dir, max_branches: int = 1_000) -> Callable[
     elif name == "cma-h2":
         hooks["score"] = theta_score(_model(d / "cma-h2.json"))
     elif name != "gls":
-        kind, hook = name.split("-")
-        ext = ".json" if kind == "lin" else ".txt"
-        if "h2" in hook:
-            hooks["score"] = h2_score(_model(d / f"{kind}-h2{ext}"))
-        if "h4" in hook:
-            hooks["rank"] = h4_rank(_model(d / f"{kind}-h4{ext}"))
+        hooks = dict(_hook(kind, hook, d) for kind, hook in parse_method(name))
     return lambda G, k, s, l, seed: run_code_bounded(G, k, s, l, seed=seed, max_branches=max_branches, **hooks)
 
 
@@ -187,7 +243,8 @@ def main(argv=None) -> None:
     ap.add_argument("--params", default="", help='e.g. "p=0.25" or "blocks=4,p_in=0.3,p_out=0.03"')
     ap.add_argument("--n", type=int)
     ap.add_argument("--seeds", help="inclusive range a-b")
-    ap.add_argument("--methods", default=",".join(BEAM_METHODS + CLASSICAL_METHODS))
+    ap.add_argument("--methods", default=",".join([m for m in BEAM_METHODS if m not in ORACLE_METHODS]
+                                                  + CLASSICAL_METHODS), help="the oracle methods run only when named")
     ap.add_argument("--widths", default="1,1,1;2,2,5;4,2,10;8,3,30", help="k,s,l triples separated by ;")
     ap.add_argument("--restarts", default="1,4", help="restart counts for the gls methods")
     ap.add_argument("--models", default="models")

@@ -11,11 +11,11 @@ import argparse, json, time
 from dataclasses import dataclass
 from pathlib import Path
 
-import lightgbm as lgb
+import networkx as nx
 import numpy as np
 
-from .engine import Rank
-from .features import PIECE_FEATURES, VERTEX_FEATURES, piece_features, vertex_features
+from .engine import Rank, Value
+from .features import PIECE_FEATURES, VERTEX_FEATURES, graph_features, piece_features, vertex_features
 from .growth import VertexScore
 
 MAX_RELEVANCE = 30   # LightGBM's default label gain table covers labels 0..30
@@ -26,9 +26,10 @@ class LinearModel:
     mu: np.ndarray
     sd: np.ndarray
     w: np.ndarray
+    b: float = 0.0
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        return ((X - self.mu) / self.sd) @ self.w
+        return ((X - self.mu) / self.sd) @ self.w + self.b
 
 
 def _groups(groups: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -57,6 +58,14 @@ def fit_linear(X: np.ndarray, y: np.ndarray, groups: np.ndarray, weights: np.nda
     return LinearModel(mu, sd, w)
 
 
+def fit_value_linear(X: np.ndarray, y: np.ndarray, ridge: float = 1e-3) -> LinearModel:
+    """Ridge regression of y on the standardised columns of X, with the intercept b = mean(y)."""
+    mu, sd = X.mean(axis=0), X.std(axis=0)
+    sd = np.where(sd == 0, 1.0, sd)
+    Z, b = (X - mu) / sd, float(np.mean(y))
+    return LinearModel(mu, sd, np.linalg.solve(Z.T @ Z + ridge * np.eye(X.shape[1]), Z.T @ (y - b)), b)
+
+
 def relevance(y: np.ndarray, groups: np.ndarray) -> np.ndarray:
     """Integer relevance labels for lambdarank: each value minus its group's minimum, capped at 30."""
     starts, _, inverse = _groups(groups)
@@ -64,8 +73,9 @@ def relevance(y: np.ndarray, groups: np.ndarray) -> np.ndarray:
 
 
 def fit_lgbm(X: np.ndarray, rel: np.ndarray, groups: np.ndarray, X_val: np.ndarray, rel_val: np.ndarray,
-             groups_val: np.ndarray, eval_at: int, weights: np.ndarray | None = None) -> lgb.Booster:
+             groups_val: np.ndarray, eval_at: int, weights: np.ndarray | None = None) -> "lgb.Booster":
     """LambdaRank on relevance labels, stopped early on validation NDCG@eval_at."""
+    import lightgbm as lgb   # lazy: torch and lightgbm cannot share a process on macOS, and train.py needs this module
     params = dict(objective="lambdarank", metric="ndcg", eval_at=[eval_at], learning_rate=0.05, num_leaves=31,
                   min_data_in_leaf=20, deterministic=True, force_row_wise=True, seed=0, verbose=-1)
     return lgb.train(params, lgb.Dataset(X, rel, group=_groups(groups)[1], weight=weights), 1000,
@@ -97,11 +107,21 @@ def h4_rank(model) -> Rank:
     return lambda g, maps: model.predict(piece_features(g, maps))
 
 
+def linear_value(model: LinearModel) -> Value:
+    """Pruning hook: the model's value of each remaining graph, from its graph features; 0.0 for an empty graph."""
+    def value(graphs: list[nx.Graph]) -> list[float]:
+        if not graphs:
+            return []
+        pred = model.predict(np.array([graph_features(g) for g in graphs])).tolist()
+        return [p if len(g) else 0.0 for p, g in zip(pred, graphs)]
+    return value
+
+
 def save(model, path) -> None:
     """A LinearModel to .json, a LightGBM booster to .txt."""
     path = Path(path)
     if path.suffix == ".json":
-        path.write_text(json.dumps({k: getattr(model, k).tolist() for k in ("mu", "sd", "w")}))
+        path.write_text(json.dumps({**{k: getattr(model, k).tolist() for k in ("mu", "sd", "w")}, "b": float(model.b)}))
     elif path.suffix == ".txt":
         model.save_model(str(path))
     else:
@@ -111,8 +131,10 @@ def save(model, path) -> None:
 def load(path):
     path = Path(path)
     if path.suffix == ".json":
-        return LinearModel(**{k: np.array(v) for k, v in json.loads(path.read_text()).items()})
+        d = json.loads(path.read_text())
+        return LinearModel(**{k: np.array(d[k]) for k in ("mu", "sd", "w")}, b=float(d.get("b", 0.0)))
     if path.suffix == ".txt":
+        import lightgbm as lgb
         return lgb.Booster(model_file=str(path))
     raise ValueError(f"cannot load a model from {path.suffix!r}; use .json or .txt")
 

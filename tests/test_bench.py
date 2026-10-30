@@ -1,5 +1,6 @@
 import json, numpy as np, pytest
-from learned_selection.bench import BEAM_METHODS, gap_pct, run_instance, shard, main as bench_main
+from learned_selection.bench import (BEAM_METHODS, NEW_METHODS, ORACLE_METHODS, gap_pct, parse_method, run_instance,
+                                     shard, main as bench_main)
 from learned_selection.curves import bootstrap_ci, curve_gain, load, paired
 from learned_selection.features import PIECE_FEATURES, VERTEX_FEATURES
 from learned_selection.models import fit_lgbm, fit_linear, save
@@ -49,16 +50,36 @@ def test_load_combines_reference_and_method_files(tmp_path):
     gls = next(r for r in load([tmp_path / "a.jsonl", tmp_path / "b.jsonl"]) if r["method"] == "gls")
     assert gls["best_known"] == 10 and gls["gap_pct"] == 10.0 and gls["proven"] is True
 
+def test_parse_method():
+    assert parse_method("lin-h2h4+gin-h5") == [("lin", "h2"), ("lin", "h4"), ("gin", "h5")]
+    assert parse_method("gat-h2h4h5") == [("gat", "h2"), ("gat", "h4"), ("gat", "h5")]
+    for bad in ("lin-h2+gin-h2", "lgb-h5", "foo-h2", "gin-h3", "gin-", "gin-h2h4x", "gin-h4h2", "exact-h2"):
+        with pytest.raises(ValueError):
+            parse_method(bad)
+    assert all(parse_method(m) for m in NEW_METHODS + ORACLE_METHODS)
+
 def test_every_beam_method_runs_with_trained_models(tmp_path):
+    import torch
+    from learned_selection.features import GRAPH_FEATURES
+    from learned_selection.gnn import GNN, save_gnn
+    from learned_selection.models import fit_value_linear
     rng = np.random.default_rng(0)
     for hook, d in (("h2", len(VERTEX_FEATURES)), ("h4", len(PIECE_FEATURES))):
         X, g, y = rng.standard_normal((60, d)), np.repeat(np.arange(6), 10), rng.integers(0, 3, 60)
         save(fit_linear(X, y, g), tmp_path / f"lin-{hook}.json")
         save(fit_lgbm(X, y, g, X, y, g, eval_at=2), tmp_path / f"lgb-{hook}.txt")
+    save(fit_value_linear(rng.standard_normal((40, len(GRAPH_FEATURES))), rng.integers(0, 9, 40)), tmp_path / "lin-h5.json")
+    d, p = len(VERTEX_FEATURES), len(PIECE_FEATURES)
+    torch.manual_seed(0)
+    for conv in ("gin", "sage", "gat"):
+        for hook, head in (("h2", "vertex"), ("h4", "piece"), ("h5", "value")):
+            save_gnn(GNN(conv, head, np.zeros(d), np.ones(d), np.zeros(p), np.ones(p)), tmp_path / f"{conv}-{hook}.pt")
     (tmp_path / "cma-h2.json").write_text(json.dumps({"theta": [6.0, 0.5, 0.0]}))
     recs = run_instance("er", {"p": 0.25}, 25, 0, BEAM_METHODS, widths=[(2, 2, 5)], restarts=[1],
                         time_limit_s=10, models_dir=tmp_path)
     assert {r["method"] for r in recs} == set(BEAM_METHODS) and all(r["size"] for r in recs)
+    assert {r["track"] for r in recs if r["method"] in NEW_METHODS} == {"structure"}
+    assert {r["track"] for r in recs if r["method"] in ORACLE_METHODS} == {"oracle"}
 
 def test_resume_skips_a_cut_off_last_line(tmp_path, capsys):
     out = tmp_path / "run.jsonl"
@@ -80,3 +101,12 @@ def test_shard_splits_instances_disjointly():
     assert shard(xs, None) == xs
     with pytest.raises(ValueError):
         shard(xs, "3/3")
+
+
+def test_a_gnn_file_with_the_wrong_head_is_refused(tmp_path):
+    from learned_selection.bench import method_runner
+    from learned_selection.gnn import GNN, save_gnn
+    d, p = len(VERTEX_FEATURES), len(PIECE_FEATURES)
+    save_gnn(GNN("gin", "vertex", np.zeros(d), np.ones(d), np.zeros(p), np.ones(p)), tmp_path / "gin-h4.pt")
+    with pytest.raises(ValueError, match=r"gin-h4\.pt.*'vertex'.*'piece'"):
+        method_runner("gin-h4", tmp_path)
