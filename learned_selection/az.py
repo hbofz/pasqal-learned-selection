@@ -192,13 +192,14 @@ def loop(a) -> None:
     for t in range(1, a.iters + 1):
         step = time.perf_counter()
         method, models = (a.method, a.models) if t == 1 else (az_name(a.method), out / f"it{t - 1}")
-        examples, net = cache / f"selfplay_it{t}{suffix}.pkl", out / f"it{t}" / "az-h4.pt"
+        played = [cache / f"selfplay_it{i}{suffix}.pkl" for i in range(1, t + 1)]   # every iteration so far is kept
+        examples, net = played[-1], out / f"it{t}" / "az-h4.pt"
         if not examples.exists():
             _run("selfplay", "--method", method, "--models", models, "--budget", a.budget, "--k", a.k,
                  "--workers", a.workers, "--out", examples, *(["--shard", a.shard] if a.shard else []))
         if not net.exists():
             _run("tune", "--init", warm if t == 1 else out / f"it{t - 1}" / "az-h4.pt", "--base-train", *a.base_train,
-                 "--examples", examples, "--out", net, "--threads", a.threads, "--workers", a.workers,
+                 "--examples", *played, "--out", net, "--threads", a.threads, "--workers", a.workers,
                  *(["--max-states", a.max_states] if a.max_states else []))
         for kind, hook in base:
             if hook != "h4" and kind != "exact":

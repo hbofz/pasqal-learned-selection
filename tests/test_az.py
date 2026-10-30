@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import networkx as nx, numpy as np, pytest, torch
 from learned_selection.az import az_name, fine_tune_policy, self_play_job, soft_listwise_loss
 from learned_selection.engine import exact_piece_solver, gls_generator
@@ -163,3 +165,30 @@ def test_az_name_swaps_the_h4_part():
     assert az_name("lin-h2+gin-h4+sage-h5+mcts-c0.5") == "lin-h2+az-h4+sage-h5+mcts-c0.5"
     assert az_name("lin-h2h4+sage-h5+mcts") == "lin-h2+az-h4+sage-h5+mcts"
     assert az_name("gin-h2h4h5+mcts") == "gin-h2+az-h4+gin-h5+mcts"
+
+
+def test_loop_tunes_on_every_iteration_of_self_play_so_far(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from learned_selection import az
+    models = tmp_path / "models"
+    models.mkdir()
+    for name in ("gin-h4.pt", "lin-h2.json", "sage-h5.pt"):
+        (models / name).touch()
+    calls = []
+
+    def fake_run(*args):
+        args = [str(x) for x in args]
+        calls.append(args)
+        target = Path(args[args.index("--out") + 1])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.touch()
+    monkeypatch.setattr(az, "_run", fake_run)
+    az.loop(SimpleNamespace(method="lin-h2+gin-h4+sage-h5+mcts", models=models, iters=3, budget=15, k=4,
+                            base_train=["base.pkl"], out=tmp_path / "out", cache=tmp_path / "cache", workers=1,
+                            threads=1, shard="0/160", max_states=None))
+    tunes = [c for c in calls if c[0] == "tune"]
+    examples = lambda c: [Path(x).name for x in c[c.index("--examples") + 1:c.index("--out")]]
+    assert [examples(c) for c in tunes] == [
+        [f"selfplay_it{i}_shard0of160.pkl" for i in range(1, t + 1)] for t in (1, 2, 3)]
+    plays = [c for c in calls if c[0] == "selfplay"]
+    assert [c[c.index("--method") + 1] for c in plays] == ["lin-h2+gin-h4+sage-h5+mcts"] + ["lin-h2+az-h4+sage-h5+mcts"] * 2
