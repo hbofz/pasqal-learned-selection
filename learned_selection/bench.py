@@ -1,84 +1,230 @@
-"""Benchmark runner: every method on the same Erdos-Renyi instances, one JSON record per (instance, method).
+"""Benchmark runner: every method on the same instances, one JSON record per (instance, method, widths, restarts).
 
-    uv run python -m learned_selection.bench --n 100 --p 0.25 --seeds 0-9 --k 4 --s 2 --l 10 --out results/er.jsonl
+    uv run python -m learned_selection.bench --grid test --workers 12 --out results/eval/test.jsonl
+    uv run python -m learned_selection.bench --family er --params p=0.25 --n 100 --seeds 0-9 \\
+        --methods gls-code,gls-paper,greedy-pasqal,greedy-mindeg,exact --widths 4,2,10 --restarts 1 --out results/er.jsonl
+
+Records are appended as each instance finishes. A rerun skips every (instance, method) already in --out, so an
+interrupted grid resumes; widths and restarts are not part of that check, so use a new --out to change them.
 """
-import argparse, json, statistics, time
+import argparse, json, subprocess, time
+from contextlib import nullcontext
+from functools import cache, partial
+from multiprocessing import Pool
 from pathlib import Path
+from typing import Callable
 
-from .engine import best_of_restarts, run_code_faithful, run_paper_faithful
-from .instances import erdos_renyi
+import networkx as nx
+
+from .engine import RunResult, _remove_closed, best_of_restarts, run_code_bounded, run_code_faithful, run_paper_faithful
+from .instances import (BIG_N, BIG_SETTINGS, HELD_OUT_SETTINGS, TEST_SEEDS, TEST_SIZES, TRAIN_SETTINGS, VAL_SEEDS,
+                        make)
+from .lattice import BLOCKADE_UM
+from .models import h2_score, h4_rank, load, load_theta, theta_score
 from .solvers import exact_mis, is_independent, min_degree_greedy
 from .vendored import weighted_greedy_independent_set
+
+BEAM_METHODS = ["gls-code", "gls", "gls-paper", "gls-screen", "lin-h2", "lin-h4", "lin-h2h4", "lgb-h2", "lgb-h4",
+                "lgb-h2h4", "cma-h2"]
+CLASSICAL_METHODS = ["greedy-pasqal", "greedy-mindeg", "exact"]
+TRACKS = {**{m: "structure" for m in BEAM_METHODS}, "gls-screen": "hybrid", **{m: "classical" for m in CLASSICAL_METHODS}}
+MINDEG_SEEDS = 20
+SMALL = 5
+COSTS = ("quantum_runs", "pasqal_runs", "atoms", "rounds", "classical_s", "solver_s", "max_atoms", "over_30",
+         "atoms_all")
 
 
 def gap_pct(size: int, best: int) -> float:
     return 0.0 if best == 0 else 100 * (best - size) / best
 
 
-def run_instance(n, p, seed, k, s, l, restarts, time_limit_s) -> list[dict]:
-    G = erdos_renyi(n, p, seed)
-    rows = []
+@cache
+def _commit() -> str:
+    return subprocess.run(["git", "describe", "--always", "--dirty"], capture_output=True, text=True,
+                          cwd=Path(__file__).parent).stdout.strip()
 
-    def beam(method, run):
-        r = best_of_restarts(run, restarts)
-        rows.append(dict(method=method, k=k, s=s, l=l, restarts=restarts, piece_solver="exact-top-s",
-                         solution=r.solution, quantum_runs=r.quantum_runs, pasqal_runs=r.pasqal_runs,
-                         atoms=r.atoms, rounds=r.rounds, classical_s=r.classical_s, solver_s=r.solver_s))
 
-    def classical(method, solve, restarts_used):
+def screen_rank(g: nx.Graph, maps: list[dict]) -> list[int]:
+    """Hybrid screen: a greedy independent set of the candidate piece plus a greedy one of what it leaves behind."""
+    def score(m):
+        S = min_degree_greedy(g.subgraph(m), 0)
+        return len(S) + len(min_degree_greedy(_remove_closed(g, S), 0))
+    return [score(m) for m in maps]
+
+
+@cache
+def _model(path: Path):
+    """Each model file is read once per process."""
+    return load_theta(path) if path.name.startswith("cma-") else load(path)
+
+
+def method_runner(name: str, models_dir, max_branches: int = 1_000) -> Callable[[nx.Graph, int, int, int, int], RunResult]:
+    """run(graph, k, s, l, seed) for a beam method."""
+    if name not in BEAM_METHODS:
+        raise ValueError(f"unknown beam method {name!r}")
+    if name == "gls-code":
+        return lambda G, k, s, l, seed: run_code_faithful(G, k, s, l, seed=seed, max_branches=max_branches)
+    if name == "gls-paper":
+        return lambda G, k, s, l, seed: run_paper_faithful(G, k, s, l, seed=seed, max_branches=max_branches)
+    d = Path(models_dir or "models")
+    hooks = {}
+    if name == "gls-screen":
+        hooks["rank"] = screen_rank
+    elif name == "cma-h2":
+        hooks["score"] = theta_score(_model(d / "cma-h2.json"))
+    elif name != "gls":
+        kind, hook = name.split("-")
+        ext = ".json" if kind == "lin" else ".txt"
+        if "h2" in hook:
+            hooks["score"] = h2_score(_model(d / f"{kind}-h2{ext}"))
+        if "h4" in hook:
+            hooks["rank"] = h4_rank(_model(d / f"{kind}-h4{ext}"))
+    return lambda G, k, s, l, seed: run_code_bounded(G, k, s, l, seed=seed, max_branches=max_branches, **hooks)
+
+
+def run_instance(family, params, n, seed, methods, widths, restarts, time_limit_s, models_dir=None,
+                 max_branches=1_000, cpsat_workers=1) -> list[dict]:
+    G = make(family, n, seed, **params)
+    rows, proven = [], None
+
+    def record(method, k, s, l, r, solution, costs):
+        rows.append(dict(method=method, track=TRACKS[method], k=k, s=s, l=l, restarts=r,
+                         piece_solver=None if k is None else "exact-top-s", solution=solution, **costs))
+
+    def classical(method, solve, r):
         t = time.perf_counter()
         S = solve()
-        rows.append(dict(method=method, k=None, s=None, l=None, restarts=restarts_used, piece_solver=None,
-                         solution=frozenset(S), quantum_runs=0, pasqal_runs=0, atoms=0, rounds=0,
-                         classical_s=time.perf_counter() - t, solver_s=0.0))
+        record(method, None, None, None, r, S, dict(dict.fromkeys(COSTS, 0), classical_s=time.perf_counter() - t,
+                                                    solver_s=0.0))
 
-    beam("gls-code", lambda i: run_code_faithful(G, k, s, l, seed=i))
-    beam("gls-paper", lambda i: run_paper_faithful(G, k, s, l, seed=i))
-    classical("greedy-pasqal", lambda: weighted_greedy_independent_set(G), 1)
-    classical("greedy-mindeg", lambda: max((min_degree_greedy(G, i) for i in range(restarts * 20)), key=len),
-              restarts * 20)
-    proven = {}
-    classical("exact", lambda: proven.setdefault("r", exact_mis(G, time_limit_s))[0], 1)
+    for m in methods:
+        if m == "greedy-pasqal":
+            classical(m, lambda: frozenset(weighted_greedy_independent_set(G)), 1)
+        elif m == "greedy-mindeg":
+            classical(m, lambda: max((min_degree_greedy(G, i) for i in range(MINDEG_SEEDS)), key=len), MINDEG_SEEDS)
+        elif m == "exact":
+            def solve():
+                nonlocal proven
+                S, proven = exact_mis(G, time_limit_s, workers=cpsat_workers)
+                return S
+            classical(m, solve, 1)
+        else:
+            run = method_runner(m, models_dir, max_branches)
+            for k, s, l in widths:
+                for r in restarts if m.startswith("gls") else [1]:
+                    try:
+                        res = best_of_restarts(lambda i: run(G, k, s, l, i), r)
+                    except RuntimeError as e:
+                        if not str(e).startswith("beam exploded"):
+                            raise
+                        record(m, k, s, l, r, None, dict.fromkeys(COSTS))
+                        continue
+                    record(m, k, s, l, r, res.solution, dict(
+                        quantum_runs=res.quantum_runs, pasqal_runs=res.pasqal_runs, atoms=res.atoms,
+                        rounds=res.rounds, classical_s=res.classical_s, solver_s=res.solver_s,
+                        max_atoms=max(res.run_sizes, default=0), over_30=sum(x > 30 for x in res.run_sizes),
+                        atoms_all=sum(res.run_sizes)))
 
-    best = max(len(r["solution"]) for r in rows)
+    best = max((len(r["solution"]) for r in rows if r["solution"] is not None), default=None)
     for r in rows:
         S = r.pop("solution")
-        assert is_independent(G, S), f"{r['method']} returned a non-independent set"
-        r.update(family="er", n=n, p=p, seed=seed, lattice="fresnel_61", includes_classical_time=True,
-                 size=len(S), best_known=best, proven=proven["r"][1], gap_pct=gap_pct(len(S), best))
+        if S is not None and not is_independent(G, S):
+            raise AssertionError(f"{r['method']} returned a non-independent set")
+        r.update(family=family, params=params, n=n, p=params.get("p"), seed=seed, lattice="fresnel_61",
+                 includes_classical_time=True, small=SMALL, blockade=BLOCKADE_UM, max_branches=max_branches,
+                 time_limit_s=time_limit_s, commit=_commit(), size=None if S is None else len(S), best_known=best,
+                 proven=proven, gap_pct=None if S is None else gap_pct(len(S), best), exploded=S is None)
     return rows
 
 
-def main():
+def parse_params(text: str) -> dict:
+    """"p=0.25,m=2" -> {"p": 0.25, "m": 2}: a value that parses as an int is an int, otherwise a float."""
+    out = {}
+    for item in filter(None, text.split(",")):
+        key, value = item.split("=")
+        try:
+            out[key] = int(value)
+        except ValueError:
+            out[key] = float(value)
+    return out
+
+
+def grid(name: str) -> list[tuple]:
+    """(family, params, n, seed) of every instance in a named grid."""
+    if name == "test":
+        return [(f, p, n, s) for f, p in TRAIN_SETTINGS + HELD_OUT_SETTINGS for n in TEST_SIZES for s in TEST_SEEDS]
+    if name == "val":
+        return [(f, p, 100, s) for f, p in TRAIN_SETTINGS for s in VAL_SEEDS]
+    return [(f, p, BIG_N, s) for f, p in BIG_SETTINGS for s in TEST_SEEDS[:10]]
+
+
+def _instance_key(family, params, n, seed) -> tuple:
+    return family, json.dumps(params, sort_keys=True), n, seed
+
+
+def _job(job: tuple, **kw) -> list[dict]:
+    family, params, n, seed, methods = job
+    return run_instance(family, params, n, seed, methods, **kw)
+
+
+def main(argv=None) -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--n", type=int, required=True)
-    ap.add_argument("--p", type=float, required=True)
-    ap.add_argument("--seeds", default="0-9", help="inclusive range a-b")
-    ap.add_argument("--k", type=int, default=4)
-    ap.add_argument("--s", type=int, default=2)
-    ap.add_argument("--l", type=int, default=10)
-    ap.add_argument("--restarts", type=int, default=1)
-    ap.add_argument("--time-limit", type=float, default=60.0)
+    ap.add_argument("--grid", choices=["test", "val", "big"])
+    ap.add_argument("--family")
+    ap.add_argument("--params", default="", help='e.g. "p=0.25" or "blocks=4,p_in=0.3,p_out=0.03"')
+    ap.add_argument("--n", type=int)
+    ap.add_argument("--seeds", help="inclusive range a-b")
+    ap.add_argument("--methods", default=",".join(BEAM_METHODS + CLASSICAL_METHODS))
+    ap.add_argument("--widths", default="1,1,1;2,2,5;4,2,10;8,3,30", help="k,s,l triples separated by ;")
+    ap.add_argument("--restarts", default="1,4", help="restart counts for the gls methods")
+    ap.add_argument("--models", default="models")
+    ap.add_argument("--workers", type=int, default=1)
+    ap.add_argument("--cpsat-workers", type=int, default=1)
+    ap.add_argument("--time-limit", type=float, default=120.0)
     ap.add_argument("--out", required=True)
-    a = ap.parse_args()
-    lo, hi = map(int, a.seeds.split("-"))
+    a = ap.parse_args(argv)
+
+    methods = a.methods.split(",")
+    unknown = set(methods) - set(BEAM_METHODS + CLASSICAL_METHODS)
+    if unknown:
+        ap.error(f"unknown methods: {', '.join(sorted(unknown))}")
+    if a.grid:
+        instances = grid(a.grid)
+    elif a.family and a.n and a.seeds:
+        lo, hi = map(int, a.seeds.split("-"))
+        instances = [(a.family, parse_params(a.params), a.n, s) for s in range(lo, hi + 1)]
+    else:
+        ap.error("give --grid, or --family with --n and --seeds")
+    time_limit = 600.0 if a.grid == "big" else a.time_limit
+
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    rows = []
-    with out.open("a") as f:
-        for seed in range(lo, hi + 1):
-            for r in run_instance(a.n, a.p, seed, a.k, a.s, a.l, a.restarts, a.time_limit):
-                f.write(json.dumps(r) + "\n")
-                rows.append(r)
-            print(f"seed {seed} done", flush=True)
-    print(f"\nER n={a.n} p={a.p} seeds {a.seeds}, widths k={a.k} s={a.s} l={a.l}, restarts={a.restarts}, "
-          f"all proven optimal: {all(r['proven'] for r in rows)}")
-    print(f"{'method':15} {'mean gap %':>10} {'quantum runs':>13} {'pasqal runs':>12} {'classical s':>12}")
-    for m in dict.fromkeys(r["method"] for r in rows):
-        ms = [r for r in rows if r["method"] == m]
-        mean = lambda key: statistics.mean(r[key] for r in ms)
-        print(f"{m:15} {mean('gap_pct'):10.2f} {mean('quantum_runs'):13.1f} {mean('pasqal_runs'):12.1f} "
-              f"{mean('classical_s'):12.2f}")
+    done = set()
+    if out.exists():
+        for line in out.read_text().splitlines():
+            if line.strip():
+                r = json.loads(line)
+                done.add((*_instance_key(r["family"], r["params"], r["n"], r["seed"]), r["method"]))
+    jobs = []
+    for f, p, n, s in instances:
+        missing = [m for m in methods if (*_instance_key(f, p, n, s), m) not in done]
+        if missing:
+            jobs.append((f, p, n, s, missing))
+    print(f"{len(jobs)} instances to run, {len(instances) - len(jobs)} already done in {out}", flush=True)
+
+    run = partial(_job, widths=[tuple(map(int, w.split(","))) for w in a.widths.split(";")],
+                  restarts=[int(r) for r in a.restarts.split(",")], time_limit_s=time_limit, models_dir=a.models,
+                  cpsat_workers=a.cpsat_workers)
+    written = 0
+    with Pool(a.workers) if a.workers > 1 else nullcontext() as pool, out.open("a") as fh:
+        for recs in pool.imap_unordered(run, jobs) if pool else map(run, jobs):
+            fh.write("".join(json.dumps(r) + "\n" for r in recs))
+            fh.flush()
+            written += len(recs)
+            r = recs[0]
+            print(f"{r['family']} {json.dumps(r['params'], sort_keys=True)} n={r['n']} seed={r['seed']}: "
+                  f"{len(recs)} records", flush=True)
+    print(f"wrote {written} records to {out}")
 
 
 if __name__ == "__main__":
