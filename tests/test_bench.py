@@ -1,5 +1,5 @@
 import json, numpy as np, pytest
-from learned_selection.bench import BEAM_METHODS, gap_pct, run_instance, main as bench_main
+from learned_selection.bench import BEAM_METHODS, gap_pct, run_instance, shard, main as bench_main
 from learned_selection.curves import bootstrap_ci, curve_gain, load, paired
 from learned_selection.features import PIECE_FEATURES, VERTEX_FEATURES
 from learned_selection.models import fit_lgbm, fit_linear, save
@@ -71,3 +71,12 @@ def test_resume_skips_a_cut_off_last_line(tmp_path, capsys):
     assert "1 instances to run, 1 already done" in captured.out
     lines = out.read_text().splitlines()
     assert len(lines) == 3 and [json.loads(lines[i])["seed"] for i in (0, 2)] == [0, 1]
+
+def test_shard_splits_instances_disjointly():
+    xs = list(range(10))
+    assert shard(xs, "0/3") == [0, 3, 6, 9]
+    shards = [shard(xs, f"{i}/3") for i in range(3)]
+    assert sorted(x for part in shards for x in part) == xs
+    assert shard(xs, None) == xs
+    with pytest.raises(ValueError):
+        shard(xs, "3/3")

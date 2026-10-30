@@ -158,6 +158,19 @@ def grid(name: str) -> list[tuple]:
     return [(f, p, BIG_N, s) for f, p in BIG_SETTINGS for s in TEST_SEEDS[:10]]
 
 
+def shard(items: list, spec: str | None) -> list:
+    """Keep the items at positions j with j % N == I for spec "I/N"; None keeps all of them."""
+    if spec is None:
+        return items
+    try:
+        i, n = map(int, spec.split("/"))
+    except ValueError:
+        raise ValueError(f"shard must look like I/N, got {spec!r}") from None
+    if n < 1 or not 0 <= i < n:
+        raise ValueError(f"shard {spec!r}: need N >= 1 and 0 <= I < N")
+    return items[i::n]
+
+
 def _instance_key(family, params, n, seed) -> tuple:
     return family, json.dumps(params, sort_keys=True), n, seed
 
@@ -182,6 +195,7 @@ def main(argv=None) -> None:
     ap.add_argument("--cpsat-workers", type=int, default=1)
     ap.add_argument("--time-limit", type=float, default=120.0)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--shard", help="I/N: run only the instances at positions j with j % N == I, e.g. 0/3")
     a = ap.parse_args(argv)
 
     methods = a.methods.split(",")
@@ -196,6 +210,9 @@ def main(argv=None) -> None:
     else:
         ap.error("give --grid, or --family with --n and --seeds")
     time_limit = 600.0 if a.grid == "big" else a.time_limit
+    instances = shard(instances, a.shard)
+    if a.shard:
+        print(f"shard {a.shard}: {len(instances)} instances kept", flush=True)
 
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
