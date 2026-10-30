@@ -25,7 +25,7 @@ def test_matches_vendored_breadthfirst_exactly(n, p, seed, ksl):
     r = run_beam(G, vendored_gls_generator(), pasqal_greedy_piece_solver(), k, s, code_prune(k, l))
     assert r.solution == frozenset(best) and r.pasqal_runs == len(nodes)
 
-@pytest.mark.parametrize("n,p,seed,ksl", CASES[:54:9] + PRUNING_CASES)
+@pytest.mark.parametrize("n,p,seed,ksl", CASES[:54:7] + PRUNING_CASES)
 def test_port_reproduces_vendored_runs(n, p, seed, ksl):
     k, s, l = ksl
     G = erdos_renyi(n, p, seed)
@@ -42,7 +42,7 @@ def test_own_rng_survives_vendored_reseeding():
     from learned_selection.engine import paper_generator
     G = erdos_renyi(50, 0.2, 2)
     random.seed(123); before, maps = min_degree_greedy(G, 7), paper_generator(seed=4)(G, 4)
-    gls_generator()(G, 4); random.seed(999)
+    vendored_gls_generator()(G, 4); random.seed(999)
     assert min_degree_greedy(G, 7) == before and paper_generator(seed=4)(G, 4) == maps
 
 def test_code_prune_running_counter():
@@ -115,7 +115,7 @@ def test_matches_vendored_on_gapped_and_shifted_int_labels(n, seed, variant):
     r = run_beam(G, vendored_gls_generator(), pasqal_greedy_piece_solver(), 4, 2, code_prune(4, 10))
     assert r.solution == frozenset(best) and r.pasqal_runs == len(nodes)
 
-@pytest.mark.parametrize("n,seed,variant", GAP_CASES[::3])
+@pytest.mark.parametrize("n,seed,variant", GAP_CASES)
 def test_port_reproduces_vendored_runs_on_gapped_labels(n, seed, variant):
     G = _gap_variant(erdos_renyi(n, 0.25, seed), variant)
     a = run_code_faithful(G, 4, 2, 10)
