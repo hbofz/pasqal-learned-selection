@@ -50,3 +50,11 @@ def test_virtual_device_takes_large_pieces():
     m = next(m for m in gls_generator()(G, len(G)) if len(m) > 30)
     seq = piece_sequence(G.subgraph(m), m, virtual_device())
     assert len(seq.register.qubits) == len(m) and seq.to_abstract_repr()
+
+def test_spread_keeps_evenly_spaced_items():
+    from learned_selection.calibrate import spread
+    xs = list(range(40))
+    picked = spread(xs, 12)
+    assert len(picked) == len(set(picked)) == 12 and picked[0] == 0 and picked[-1] == 39 and picked == sorted(picked)
+    assert spread(xs, len(xs)) == xs
+    assert spread(xs, 1) == [xs[0]]

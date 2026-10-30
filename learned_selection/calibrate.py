@@ -1,6 +1,6 @@
 """Calibrate the exact classical stand-in against a Pasqal cloud emulator.
 
-    uv run python -m learned_selection.calibrate [--set small|medium|large]
+    uv run python -m learned_selection.calibrate [--set small|medium|large] [--count N]
 
 Pieces: the first-round GLS candidates (k=4) of the graphs in SETS (small: 11-20 atoms, medium: 25-26). The large set
 is 40 first-round candidates over 30 atoms from sparse graph families, run on virtual_device() (AnalogDevice with its
@@ -58,6 +58,13 @@ def large_pieces():
     return [found[round(i * (len(found) - 1) / (LARGE_COUNT - 1))][4:] for i in range(LARGE_COUNT)]
 
 
+def spread(items, count):
+    """Take count items evenly spaced across items, keeping their order."""
+    if count == 1:
+        return [items[0]]
+    return [items[round(i * (len(items) - 1) / (count - 1))] for i in range(count)]
+
+
 BUILD = {"small": lambda: pieces(SETS["small"]), "medium": lambda: pieces(SETS["medium"]), "large": large_pieces}
 DEVICE = {"small": EMULATION_DEVICE, "medium": EMULATION_DEVICE, "large": virtual_device()}
 ATOM_CAP = {"small": MAX_ATOMS, "medium": MAX_ATOMS, "large": LARGE_MAX_ATOMS}
@@ -98,10 +105,18 @@ def calibrate_one(item, which="small"):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--set", choices=sorted(BUILD), default="small")
-    which = ap.parse_args().set
+    ap.add_argument("--count", type=int)
+    args = ap.parse_args()
+    which = args.set
     items = list(BUILD[which]())
     todo = [it for it in items if len(it[1]) <= ATOM_CAP[which]]
-    print(f"{len(items)} pieces, {len(items) - len(todo)} skipped for exceeding {ATOM_CAP[which]} atoms", flush=True)
+    skipped = len(items) - len(todo)
+    if args.count is not None:
+        if not 1 <= args.count <= len(todo):
+            ap.error(f"--count must be between 1 and {len(todo)}")
+        todo = spread(todo, args.count)
+    print(f"{len(items)} pieces, {skipped} skipped for exceeding {ATOM_CAP[which]} atoms, {len(todo)} kept "
+          f"({min(len(p) for _, p, _ in todo)}-{max(len(p) for _, p, _ in todo)} atoms)", flush=True)
     OUT[which].parent.mkdir(parents=True, exist_ok=True)
     rows = []
     with ThreadPoolExecutor(max_workers=8) as pool, OUT[which].open("a") as f:
