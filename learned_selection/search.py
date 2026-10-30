@@ -14,8 +14,11 @@ from .lattice import is_valid_piece, lattice_graph, load_coords
 from .solvers import canonical, first_maximum_set, is_independent
 
 
+TRACE_VISITS = 16   # a node is traced for self-play from this many visits
+
+
 class _Node:
-    __slots__ = ("g", "sol", "depth", "v", "N", "W", "kids", "cands", "expanded", "done")
+    __slots__ = ("g", "sol", "depth", "v", "N", "W", "kids", "cands", "expanded", "done", "tr")
 
     def __init__(self, g, sol, depth, v):
         self.g, self.sol, self.depth, self.v = g, sol, depth, v   # v: partial size plus predicted value-to-go
@@ -23,14 +26,16 @@ class _Node:
         self.kids: list[tuple[_Node, float]] = []    # solved children, each with its share of the prior
         self.cands: list[tuple[dict, float]] = []    # unsolved pieces, each with its prior
         self.expanded = self.done = False
+        self.tr = None   # with a trace: the generator's list, the indices expanded and unsolved, their children
 
 
 def run_mcts(graph: nx.Graph, k: int, s: int, budget: int, score: VertexScore, rank: Rank, value: Value,
              c: float = 1.0, solve=exact_piece_solver, seed: int = 0, small: int = 5, trace: list | None = None,
              noise: tuple | None = None) -> RunResult:
     """Search until `budget` solves are counted or the tree is exhausted, then dive along the most visited children
-    to a terminal. The answer is the largest complete set seen. `trace` and `noise` are for self-play and do
-    nothing here."""
+    to a terminal. The answer is the largest complete set seen. `trace` and `noise` are for self-play: with a list,
+    one dict per node of at least TRACE_VISITS visits is appended at the end; with (eps, alpha, rng), the root's
+    priors are mixed with Dirichlet(alpha) noise when it expands. Neither changes the search otherwise."""
     start = time.perf_counter()
     L = lattice_graph(load_coords())
     if all(type(v) is int for v in graph):
@@ -55,17 +60,25 @@ def run_mcts(graph: nx.Graph, k: int, s: int, budget: int, score: VertexScore, r
     def expand(node):
         """The first k pieces of distinct vertex sets, with the softmax of their rank scores as priors."""
         scores.clear()
-        picked, sets = [], set()
-        for m in generate(node.g, len(node.g)):
+        picked, at, sets = [], [], set()
+        maps = generate(node.g, len(node.g))
+        for i, m in enumerate(maps):
             if (key := frozenset(m)) not in sets:
                 sets.add(key)
                 picked.append(m)
+                at.append(i)
             if len(picked) == k:
                 break
         x = np.array([scores[id(m)] for m in picked], dtype=float)
         p = np.exp(x - x.max())
-        node.cands = list(zip(picked, (p / p.sum()).tolist()))
+        p /= p.sum()
+        if noise is not None and node is root:
+            eps, alpha, rng = noise
+            p = (1 - eps) * p + eps * rng.dirichlet([alpha] * len(p))
+        node.cands = list(zip(picked, p.tolist()))
         node.expanded = True
+        if trace is not None:
+            node.tr = dict(pieces=maps, expanded=at, left=at[:], kids={})
 
     def finish(node) -> float:
         """A terminal: counted once if non-empty, its complete set is a candidate answer."""
@@ -84,6 +97,7 @@ def run_mcts(graph: nx.Graph, k: int, s: int, budget: int, score: VertexScore, r
         """Solve candidate i of node (one counted solve) and hang its children under it."""
         nonlocal quantum_runs, pasqal_runs, atoms, solver_s
         m, prior = node.cands.pop(i)
+        j = node.tr["left"].pop(i) if node.tr else None
         if not m:
             raise ValueError("generator returned an empty piece")
         if not is_valid_piece(node.g, m, L):
@@ -108,6 +122,8 @@ def run_mcts(graph: nx.Graph, k: int, s: int, budget: int, score: VertexScore, r
         kids = [_Node(h, node.sol + list(S), node.depth + 1, len(node.sol) + len(S) + float(v))
                 for h, S, v in zip(rest, sets, value(rest), strict=True)]
         node.kids += [(q, prior / len(kids)) for q in kids]
+        if node.tr:
+            node.tr["kids"][j] = kids
         return kids
 
     def select(node):
@@ -167,9 +183,31 @@ def run_mcts(graph: nx.Graph, k: int, s: int, budget: int, score: VertexScore, r
     if not node.done:
         finish(node)
 
+    if trace is not None:
+        trace += _traced(root)
     solution = frozenset(best) if back is None else frozenset(back[v] for v in best)
     if not is_independent(graph, solution):
         raise AssertionError("final answer is not an independent set of the original graph")
     total_s = time.perf_counter() - start
     return RunResult(solution, len(solution), quantum_runs, pasqal_runs, atoms, deepest, total_s - solver_s,
                      solver_s, run_sizes)
+
+
+def _traced(root: _Node) -> list[dict]:
+    """The self-play examples of a finished tree, root first: every expanded node of at least TRACE_VISITS visits,
+    with positions in list(node.g) and, per expanded candidate, the visits of its children."""
+    out, stack = [], [root]
+    while stack:
+        node = stack.pop()
+        stack += [q for q, _ in reversed(node.kids)]
+        if node.tr is None or node.N < TRACE_VISITS:
+            continue
+        at = {v: i for i, v in enumerate(node.g)}
+        out.append(dict(
+            n=len(node.g),
+            edges=np.array([(at[u], at[v]) for u, v in node.g.edges()], dtype=np.int32).reshape(-1, 2),
+            pieces=[np.array([at[v] for v in m], dtype=np.int16) for m in node.tr["pieces"]],
+            expanded=np.array(node.tr["expanded"], dtype=np.int64),
+            visits=np.array([sum(q.N for q in node.tr["kids"].get(j, ())) for j in node.tr["expanded"]],
+                            dtype=np.float64)))
+    return out
