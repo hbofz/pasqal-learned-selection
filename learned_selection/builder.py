@@ -308,6 +308,12 @@ def _copy_companions(a, dest: Path) -> None:
         shutil.copy2(Path(a.models) / f"{name}{KIND_EXT[name.split('-')[0]]}", dest)
 
 
+def _write_meta(meta: dict, path: Path) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(meta, indent=2))
+    os.replace(tmp, path)
+
+
 def clone(a) -> None:
     from .az import _cpu_s
     from .dataset import _commit
@@ -331,7 +337,7 @@ def clone(a) -> None:
                 decisions=decisions, loss=[h[0] for h in history], agreement=[h[1] for h in history],
                 train=[str(p) for p in a.train], max_states=a.max_states, cpu_s=_cpu_s() - cpu,
                 wall_s=time.perf_counter() - start, commit=_commit())
-    (out / "train_meta_bld-h3.json").write_text(json.dumps(meta, indent=2))
+    _write_meta(meta, out / "train_meta_bld-h3.json")
     print(f"cloned {a.expert}: agreement {history[0][1]:.3f} -> {history[-1][1]:.3f}, cpu {meta['cpu_s']:.0f} s, "
           f"wall {meta['wall_s']:.0f} s", flush=True)
 
@@ -364,6 +370,7 @@ def _rl_step(model, opt, pool, a, t: int, states: list[dict]) -> dict:
 
 def rl(a) -> None:
     from .az import _cpu_s
+    from .dataset import _commit
     states = [r for r in _training_states(a) if r["n"] >= a.min_n]
     if len(states) < a.states:
         raise ValueError(f"{len(states)} states of at least {a.min_n} nodes, fewer than the {a.states} an iteration needs")
@@ -392,12 +399,16 @@ def rl(a) -> None:
             print(f"rl {step}: reward {row['reward']:.3f} size {row['size']:.1f} loss {row['loss']:.4f} "
                   f"{row['seconds']:.0f} s", flush=True)
         _close(pool)
-        t = stop
+        t, spent = stop, before + _cpu_s() - cpu
+        meta = dict(iter=t, iters=a.iters, init=str(a.init), rank=a.rank, value=a.value, seed=a.seed, lr=a.lr,
+                    states=a.states, starts=a.starts, samples=a.samples, min_n=a.min_n, train=[str(p) for p in a.train],
+                    max_states=a.max_states, cpu_s=spent, commit=_commit())
         if t % a.every == 0:
             _copy_companions(a, out / f"it{t}")
             save_builder(model, out / f"it{t}" / "bld-h3.pt")
-        _atomic_save(dict(model=model.state_dict(), opt=opt.state_dict(), t=t, cpu_s=before + _cpu_s() - cpu),
-                     out / "state.pt")
+            _write_meta(meta, out / f"it{t}" / "train_meta_bld-h3.json")
+        _atomic_save(dict(model=model.state_dict(), opt=opt.state_dict(), t=t, cpu_s=spent), out / "state.pt")
+        _write_meta(meta, out / "train_meta_bld-h3.json")
     print(f"rl: {t} iterations, cpu {before + _cpu_s() - cpu:.0f} s", flush=True)
 
 

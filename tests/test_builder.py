@@ -308,7 +308,14 @@ def test_rl_resume_matches_an_unbroken_run(tmp_path):
     assert [l["iter"] for l in lines] == [1, 2, 3, 4]
     state = torch.load(tmp_path / "broken" / "state.pt", weights_only=True)
     assert state["t"] == 4 and state["cpu_s"] > 0
-    for f in ("bld-h3.pt", "gin-h4.pt", "gin-h5.pt"):                       # so --models resolves bld-h3+gin-h4+gin-h5
+    for where in (tmp_path / "broken", tmp_path / "broken" / "it4"):          # provenance beside the model and in the run dir
+        meta = json.loads((where / "train_meta_bld-h3.json").read_text())
+        assert meta["iter"] == 4 and meta["seed"] == 3 and meta["lr"] == 1e-4 and meta["commit"] and meta["cpu_s"] > 0
+        assert meta["init"] == str(tmp_path / "init.pt") and meta["train"] == [str(tmp_path / "s.pkl")]
+        assert (meta["states"], meta["starts"], meta["samples"], meta["min_n"]) == (2, 2, 2, 20)
+    assert sorted(p.name for p in (tmp_path / "broken").iterdir() if p.is_file()) == [
+        "log.jsonl", "state.pt", "train_meta_bld-h3.json"]                   # no stray temp files
+    for f in ("bld-h3.pt", "gin-h4.pt", "gin-h5.pt"):                     # so --models resolves bld-h3+gin-h4+gin-h5
         assert (tmp_path / "broken" / "it2" / f).exists()
 
 
