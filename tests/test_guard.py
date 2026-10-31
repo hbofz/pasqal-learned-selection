@@ -72,3 +72,13 @@ def test_labels_guard_passes_on_a_fresh_pickle_and_fails_on_a_changed_one(tmp_pa
     bad = tmp_path / "bad.pkl"
     bad.write_bytes(pickle.dumps(dict(meta={}, states=states)))
     assert labels_guard([bad], [(fam, params, n, seed)], workers=1) == (len(states) - 1, 1)
+
+
+def test_guard_fresh_grid(tmp_path, capsys):
+    inst = next(i for i in grid("fresh") if i[3] == 1020)
+    rows = run_instance(*inst, ["gls"], widths=[(1, 1, 1)], restarts=[1], time_limit_s=5)
+    f = write(tmp_path / "fresh.jsonl", rows)
+    with pytest.raises(SystemExit) as e:
+        main(["--records", str(f), "--methods", "gls", "--grid", "fresh", "--seeds", "1020-1020", "--stride", "26",
+              "--count", "1"])
+    assert e.value.code == 0 and "1 same, 0 differ" in capsys.readouterr().out

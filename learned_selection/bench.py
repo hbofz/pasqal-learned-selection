@@ -18,7 +18,7 @@ import networkx as nx
 import numpy as np
 
 from . import dataset
-from .engine import RunResult, _remove_closed, best_of_restarts, run_code_bounded, run_code_faithful, run_paper_faithful
+from .engine import RunResult, _remove_closed, best_of_restarts, exact_piece_solver, run_code_bounded, run_code_faithful, run_paper_faithful
 from .instances import (BIG_N, BIG_SETTINGS, FRESH_SEEDS, HELD_OUT_SETTINGS, SEL_SEEDS, SEL_SIZES, TEST_SEEDS,
                         TEST_SIZES, TRAIN_SEEDS, TRAIN_SETTINGS, TRAIN_SIZES, VAL_SEEDS, make)
 from .lattice import BLOCKADE_UM
@@ -189,20 +189,22 @@ def method_hooks(name: str, models_dir) -> dict:
     return hooks
 
 
-def method_runner(name: str, models_dir, max_branches: int = 1_000) -> Callable[[nx.Graph, int, int, int, int], RunResult]:
-    """run(graph, k, s, l, seed) for a beam method. A bandit ignores k and s, and reads c = l / 1000."""
+def method_runner(name: str, models_dir, max_branches: int = 1_000,
+                  solve=exact_piece_solver) -> Callable[[nx.Graph, int, int, int, int], RunResult]:
+    """run(graph, k, s, l, seed) for a beam method, each piece solved by `solve`. A bandit ignores k and s, and reads
+    c = l / 1000."""
     if name in BANDIT_METHODS:
         from . import bandit     # lazily, like the models: bandit reaches them through this function
-        return bandit.instance_runner(models_dir) if name == "bandit-i" else bandit.round_runner(models_dir)
+        return bandit.instance_runner(models_dir, solve) if name == "bandit-i" else bandit.round_runner(models_dir, solve)
     if not known_method(name) or name in CLASSICAL_METHODS:
         raise ValueError(f"unknown beam method {name!r}")
     if search_of(name) is not None:   # l is the budget of counted solves, and max_branches does not apply
         hooks = method_hooks(name, models_dir)
-        return lambda G, k, s, l, seed: run_mcts(G, k, s, l, c=search_of(name), seed=seed, **hooks)
+        return lambda G, k, s, l, seed: run_mcts(G, k, s, l, c=search_of(name), seed=seed, solve=solve, **hooks)
     if name == "gls-code":
-        return lambda G, k, s, l, seed: run_code_faithful(G, k, s, l, seed=seed, max_branches=max_branches)
+        return lambda G, k, s, l, seed: run_code_faithful(G, k, s, l, solve=solve, seed=seed, max_branches=max_branches)
     if name == "gls-paper":
-        return lambda G, k, s, l, seed: run_paper_faithful(G, k, s, l, seed=seed, max_branches=max_branches)
+        return lambda G, k, s, l, seed: run_paper_faithful(G, k, s, l, solve=solve, seed=seed, max_branches=max_branches)
     d = Path(models_dir or "models")
     hooks = {}
     if name == "gls-screen":
@@ -211,17 +213,17 @@ def method_runner(name: str, models_dir, max_branches: int = 1_000) -> Callable[
         hooks["score"] = theta_score(_model(d / "cma-h2.json"))
     elif name != "gls":
         hooks = method_hooks(name, models_dir)
-    return lambda G, k, s, l, seed: run_code_bounded(G, k, s, l, seed=seed, max_branches=max_branches, **hooks)
+    return lambda G, k, s, l, seed: run_code_bounded(G, k, s, l, solve=solve, seed=seed, max_branches=max_branches, **hooks)
 
 
 def run_instance(family, params, n, seed, methods, widths, restarts, time_limit_s, models_dir=None,
-                 max_branches=1_000, cpsat_workers=1) -> list[dict]:
+                 max_branches=1_000, cpsat_workers=1, solve=exact_piece_solver, piece_solver="exact-top-s") -> list[dict]:
     G = make(family, n, seed, **params)
     rows, proven = [], None
 
     def record(method, k, s, l, r, solution, costs):
         rows.append(dict(method=method, track=track_of(method), k=k, s=s, l=l, restarts=r,
-                         piece_solver=None if k is None else "exact-top-s", solution=solution, **costs))
+                         piece_solver=None if k is None else piece_solver, solution=solution, **costs))
 
     def classical(method, solve, r):
         t = time.perf_counter()
@@ -241,7 +243,7 @@ def run_instance(family, params, n, seed, methods, widths, restarts, time_limit_
                 return S
             classical(m, solve, 1)
         else:
-            run = method_runner(m, models_dir, max_branches)
+            run = method_runner(m, models_dir, max_branches, solve)
             for k, s, l in widths:
                 for r in restarts if m.startswith("gls") else [1]:
                     try:
