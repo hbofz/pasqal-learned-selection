@@ -161,7 +161,15 @@ def main(argv=None) -> None:
         _atomic(lambda p: torch.save(state, p), out / "state.pt")
         return state
 
-    pool = multiprocessing.get_context("spawn").Pool(a.workers, torch.set_num_threads, (1,)) if a.workers > 1 else None
+    def new_pool():
+        return multiprocessing.get_context("spawn").Pool(a.workers, torch.set_num_threads, (1,)) if a.workers > 1 else None
+
+    def stop(pool):
+        if pool:
+            pool.close()
+            pool.join()   # a child's CPU is counted only once it has been waited for
+
+    pool = new_pool() if t < a.iters else None
     while t < a.iters:
         t += 1
         step = time.perf_counter()
@@ -179,11 +187,11 @@ def main(argv=None) -> None:
         print(f"it {t}: size {row['size']:.2f} runs {row['runs']:.1f} reward {row['reward']:.3f} "
               f"decisions {row['decisions']} {row['seconds']:.1f} s", flush=True)
         if t % a.every == 0:
+            stop(pool)   # so the saved CPU total includes the workers; they hold no state, a fresh pool follows
             save_model()
             save_state()
-    if pool:
-        pool.close()
-        pool.join()   # a child's CPU is counted only once it has been waited for
+            pool = new_pool() if t < a.iters else None
+    stop(pool)
     if t % a.every:
         save_model()
     state = save_state()

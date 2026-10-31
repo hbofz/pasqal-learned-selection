@@ -1,4 +1,4 @@
-import json
+import json, resource
 
 import networkx as nx, numpy as np, pytest, torch
 from learned_selection import pg
@@ -123,6 +123,23 @@ def test_pg_resume_matches_an_unbroken_run(tmp_path):
     assert [r["t"] for r in rows] == [1, 2, 3, 4]
     meta = json.loads((tmp_path / "split" / "train_meta_pg-h4.json").read_text())
     assert meta["c"] == 0.01 and meta["cpu_s"] > 0 and meta["wall_s"] > 0
+
+
+def test_a_checkpoint_counts_the_cpu_of_the_workers(tmp_path, monkeypatch):
+    models = _toy_models(tmp_path / "models")
+    children = lambda: (lambda r: r.ru_utime + r.ru_stime)(resource.getrusage(resource.RUSAGE_CHILDREN))
+    before, seen, atomic = children(), [], pg._atomic
+
+    def spy(write, path):
+        atomic(write, path)
+        if path.name == "state.pt":
+            seen.append((torch.load(path, weights_only=True)["cpu"], children() - before))
+    monkeypatch.setattr(pg, "_atomic", spy)
+    pg.main(["--init", str(models / "dgin-h4.pt"), "--models", str(models), "--iters", "2", "--every", "1",
+             "--instances", "2", "--rollouts", "1", "--workers", "2", "--threads", "1", "--out", str(tmp_path / "o")])
+    cpu, kids = seen[0]   # the checkpoint after iteration 1, taken mid-run
+    assert kids > 0 and cpu >= kids
+    assert seen[1][0] >= cpu
 
 
 def test_higher_run_cost_gives_a_lower_reward(tmp_path):
