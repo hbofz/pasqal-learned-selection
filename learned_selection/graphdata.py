@@ -23,14 +23,14 @@ from .engine import gls_generator
 from .instances import SEL_SEEDS, TEST_SEEDS, make
 
 
-def state_record(g: nx.Graph, first: bool, time_limit_s: float, workers: int, score=None) -> dict:
-    """One labelled state, its candidates grown with `score` (the GLS priority when None). Node indices are
-    positions in list(g). member, alpha and q are None when unproven; children holds the children proven before
-    the first unproven solve."""
+def state_record(g: nx.Graph, first: bool, time_limit_s: float, workers: int, score=None, build=None) -> dict:
+    """One labelled state, its candidates grown with `score` (the GLS priority when None) or made by `build`.
+    Node indices are positions in list(g). member, alpha and q are None when unproven; children holds the
+    children proven before the first unproven solve."""
     nodes = list(g)
     at = {v: i for i, v in enumerate(nodes)}
     member = mis_membership(g, time_limit_s, workers)
-    maps = gls_generator(score=score)(g, len(g))
+    maps = gls_generator(score=score, build=build)(g, len(g))
     q, children = children_values(g, maps, time_limit_s=time_limit_s, workers=workers)
     return dict(
         n=len(g),
@@ -73,7 +73,7 @@ def label_graphs(family: str, params: dict, n: int, seed: int, max_states: int =
         if len(g) > big:
             out["deferred"].append((g, first))
             continue
-        rec = state_record(g, first, time_limit_s, 1, score=hooks.get("score"))
+        rec = state_record(g, first, time_limit_s, 1, score=hooks.get("score"), build=hooks.get("build"))
         out["states"].append(rec)
         _count_dropped(out["dropped"], (), rec)
     out["cpu_s"] = time.process_time() - start
@@ -95,8 +95,8 @@ def _defer_job(args: tuple) -> tuple[dict, float]:
     """Label one deferred state; the CPU time is measured here, in the worker that spent it."""
     g, first, policy, models_dir = args
     start = time.process_time()
-    score = method_hooks(policy, models_dir).get("score") if policy else None
-    rec = state_record(g, first, DEFERRED_TIME_LIMIT_S, 8, score=score)
+    hooks = method_hooks(policy, models_dir) if policy else {}
+    rec = state_record(g, first, DEFERRED_TIME_LIMIT_S, 8, score=hooks.get("score"), build=hooks.get("build"))
     return rec, time.process_time() - start
 
 

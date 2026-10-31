@@ -121,3 +121,10 @@ def test_main_names_files_by_job_for_linear_rankers(tmp_path, capsys):
         "dlin-h2.json", "lin-h4.json", "train_meta_dlin-h2.json", "train_meta_lin-h4.json"]
     assert json.loads((tmp_path / "o" / "train_meta_dlin-h2.json").read_text())["job"] == "dlin-h2"
     assert "dlin-h2: val regret" in capsys.readouterr().out
+
+def test_jobs_accept_a_builder_stack_prefix():
+    from learned_selection import train
+    assert train._jobs("bgin-h4,bgin-h5") == [("bgin-h4", "gin", "h4"), ("bgin-h5", "gin", "h5")]
+    for bad in ("blin-h2x", "bfoo-h2"):
+        with pytest.raises(SystemExit):
+            train._jobs(bad)

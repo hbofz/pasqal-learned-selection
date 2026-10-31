@@ -226,3 +226,16 @@ def test_value_hook_returning_too_few_scores_fails_loudly():
     level = [(nx.empty_graph(2), [0] * i) for i in range(5)]
     with pytest.raises(ValueError):
         code_prune(2, 3, value=lambda graphs: [0.0] * (len(graphs) - 1))(level, 5)
+
+
+def test_build_replaces_growth_and_keeps_the_rank():
+    G = erdos_renyi(40, 0.15, 1)
+    seen = []
+    def build(g):
+        seen.append(len(g))
+        return [{v: 32} for v in g]             # one single-vertex piece per vertex: always fits
+    rank = lambda g, maps: [-next(iter(m)) for m in maps]
+    picked = gls_generator(rank=rank, build=build)(G, 2)
+    assert seen == [40] and [set(m) for m in picked] == [{0}, {1}]
+    r = run_code_bounded(G, 2, 2, 5, rank=rank, build=build)
+    assert is_independent(G, r.solution) and r.size > 0

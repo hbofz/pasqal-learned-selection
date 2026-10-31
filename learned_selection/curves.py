@@ -20,7 +20,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .bench import BEAM_METHODS, GNN_KINDS, ORACLE_METHODS, gap_pct, known_method, parse_method, search_of, track_of
+from .bench import (BEAM_METHODS, GNN_KINDS, ORACLE_METHODS, gap_pct, known_method, parse_method, search_of, tilt_of,
+                    track_of)
 from .instances import HELD_OUT_SETTINGS, SEL_SEEDS, SEL_SIZES, TEST_SEEDS, TEST_SIZES, TRAIN_SETTINGS, VAL_SEEDS
 
 HEADLINE_CONFIG = (4, 2, 10, 1)   # k, s, l, restarts
@@ -191,6 +192,15 @@ def curve_gain(rows, method, baseline="gls", runs_key="quantum_runs", reps=2000,
     return out
 
 
+def _pools(seeds) -> list[tuple[str, list[tuple]]]:
+    """The (name, cells) pools of a seed set: see `headline`."""
+    pools = ([("validation", TRAIN_SETTINGS, (100,))] if seeds == VAL_SEEDS else
+             [("selection", TRAIN_SETTINGS, SEL_SIZES)] if seeds == SEL_SEEDS else
+             [("training", TRAIN_SETTINGS, TEST_SIZES), ("held-out", HELD_OUT_SETTINGS, TEST_SIZES)])
+    return [(pool, [(f, json.dumps(p, sort_keys=True), n) for f, p in settings for n in sizes])
+            for pool, settings, sizes in pools]
+
+
 def headline(rows, runs_key, reps=2000, seed=0, seeds=TEST_SEEDS, baseline="gls", methods=None,
              configs: dict[str, tuple] | None = None) -> list[dict]:
     """Each learned method in `rows` (or each of `methods`) against `baseline` (which is skipped as a method), at its
@@ -199,12 +209,8 @@ def headline(rows, runs_key, reps=2000, seed=0, seeds=TEST_SEEDS, baseline="gls"
     left to the per-setting tables. On VAL_SEEDS the one pool is the validation grid: the training settings at
     n=100. On SEL_SEEDS it is the selection grid: the training settings at SEL_SIZES."""
     tables = _tables([r for r in rows if r["seed"] in seeds])
-    pools = ([("validation", TRAIN_SETTINGS, (100,))] if seeds == VAL_SEEDS else
-             [("selection", TRAIN_SETTINGS, SEL_SIZES)] if seeds == SEL_SEEDS else
-             [("training", TRAIN_SETTINGS, TEST_SIZES), ("held-out", HELD_OUT_SETTINGS, TEST_SIZES)])
     out = []
-    for pool, settings, sizes in pools:
-        cells = [(f, json.dumps(p, sort_keys=True), n) for f, p in settings for n in sizes]
+    for pool, cells in _pools(seeds):
         for method in (m for m in (learned_in(rows) if methods is None else methods) if m != baseline):
             cfg = (method, *(configs or {}).get(method, HEADLINE_CONFIG))
             prepared = [_prepare(tables[c], cfg, baseline, runs_key) for c in cells if cfg in tables.get(c, {})]
@@ -213,6 +219,65 @@ def headline(rows, runs_key, reps=2000, seed=0, seeds=TEST_SEEDS, baseline="gls"
                                 instances=sum(R.shape[1] for R, _, _ in prepared),
                                 dropped=sum(d for _, _, d in prepared),
                                 **_gain([(R, G) for R, G, _ in prepared], reps, seed)))
+    return out
+
+
+PAIRED_MARGIN = 0.25   # gap points a method may add and still save runs (the bar's curve trades this for 20% of runs)
+
+
+def _paired_cell(table, cfg, base, runs_key):
+    """(log of method runs over baseline runs, method gap minus baseline gap), one entry per instance where both
+    finished; the log is nan where either made no runs. None where there is no such instance."""
+    m, b = table.get(cfg, {}), table.get(base, {})
+    used = [i for i in sorted(m) if i in b and not m[i]["exploded"] and not b[i]["exploded"]]
+    if not used:
+        return None
+    logr = [math.log(m[i][runs_key] / b[i][runs_key]) if m[i][runs_key] and b[i][runs_key] else math.nan for i in used]
+    return np.array(logr), np.array([m[i]["gap_pct"] - b[i]["gap_pct"] for i in used])
+
+
+def paired_gain(rows, method, baseline, runs_key="quantum_runs", config=HEADLINE_CONFIG, base_config=None,
+                reps=2000, seed=0, seeds=TEST_SEEDS) -> list[dict]:
+    """The method at `config` against the baseline at `base_config` (default `config`) at equal width, one row per
+    pool as `headline` builds them. In each cell, over the instances where both finished: R, the geometric mean of
+    the method's runs over the baseline's (an instance where either made no runs is left out and counted in
+    `no_runs`), and D, the mean of the method's gap minus the baseline's. run_ratio is the geometric mean of R over
+    cells and d_gap the mean of D, each with a 95% bootstrap CI that draws instances with replacement within each
+    cell. The verdict is "saves runs" if the run_ratio CI lies below 1 and the d_gap CI's upper end below
+    PAIRED_MARGIN, "costs gap" if its lower end lies above PAIRED_MARGIN, else "no clear change"."""
+    tables = _tables([r for r in rows if r["seed"] in seeds])
+    cfg, base = (method, *config), (baseline, *(base_config or config))
+    rng = np.random.default_rng(seed)
+    ci = lambda v: np.percentile(v, [2.5, 97.5]).tolist() if len(v) else (None, None)
+    out = []
+    for pool, cells in _pools(seeds):
+        pts, boots, instances, no_runs = [], [], 0, 0
+        for cell in cells:
+            if (got := _paired_cell(tables.get(cell, {}), cfg, base, runs_key)) is None:
+                continue
+            logr, diff = got
+            ok = ~np.isnan(logr)
+            idx = rng.integers(0, len(diff), (reps, len(diff)))
+            kept = ok[idx].sum(1)
+            pts.append((logr[ok].mean() if ok.any() else math.nan, diff.mean()))
+            boots.append((np.where(kept > 0, np.where(ok, logr, 0.0)[idx].sum(1) / np.maximum(kept, 1), math.nan),
+                          diff[idx].mean(1)))
+            instances, no_runs = instances + len(diff), no_runs + int((~ok).sum())
+        if not pts:
+            continue
+        L, D = np.array(pts).T
+        LB, DB = (np.array(x) for x in zip(*boots))      # cells x reps
+        defined = np.isfinite(LB)       # a resample with no run-making instance in a cell leaves that cell out
+        some = defined.any(0)
+        r_lo, r_hi = ci(np.exp(np.where(defined, LB, 0.0).sum(0)[some] / defined.sum(0)[some]))
+        d_lo, d_hi = ci(DB.mean(0))
+        verdict = ("saves runs" if r_hi is not None and r_hi < 1 and d_hi < PAIRED_MARGIN else
+                   "costs gap" if d_lo > PAIRED_MARGIN else "no clear change")
+        out.append(dict(pool=pool, method=method, baseline=baseline, runs_key=runs_key, cells=len(pts),
+                        instances=instances, no_runs=no_runs,
+                        run_ratio=float(np.exp(L[np.isfinite(L)].mean())) if np.isfinite(L).any() else None,
+                        run_ratio_lo=r_lo, run_ratio_hi=r_hi,
+                        d_gap=float(D.mean()), d_gap_lo=d_lo, d_gap_hi=d_hi, verdict=verdict))
     return out
 
 
@@ -268,7 +333,8 @@ COLORS = {"gls": "#2a78d6", "lin": "#eb6834", "lgb": "#1baf7a", "cma": "#eda100"
           "sage": "#6250d6", "gat": "#008300", "gls-screen": "#e87ba4", "gls-paper": "#a3a29a",
           "gls-code": "#6e6d68", "exact": "#0b0b0b", "az": "#882255"}
 COLORS.update({"d" + k: COLORS[k] for k in ("lin", "gin", "sage", "gat")})   # told apart by their dotted line
-MARKERS = {"h2": "o", "h4": "s", "h2h4": "^", "h5": "D", "h2h4h5": "P", "mcts": "*"}
+COLORS.update(bgin=COLORS["gin"], pg=COLORS["az"], bld=COLORS["az"])         # pg and bld share az's colour
+MARKERS = {"h2": "o", "h4": "s", "h2h4": "^", "h5": "D", "h2h4h5": "P", "h3h4h5": "X", "mcts": "*"}
 SURFACE, INK, INK_2, GRID, AXIS = "#fcfcfb", "#0b0b0b", "#52514e", "#e1e0d9", "#c3c2b7"
 RUN_LABELS = {"quantum_runs": "quantum runs", "pasqal_runs": "piece-solver runs"}
 GNN_COLORS = {COLORS[k] for k in GNN_KINDS}
@@ -276,16 +342,19 @@ GNN_COLORS = {COLORS[k] for k in GNN_KINDS}
 
 def _style(method: str) -> tuple[str, str, str]:
     """(colour, marker, line style) of a beam method. A composed name takes the colour of the kind that provides
-    its last hook and the marker of its joined hook set (a star for tree search). Its line is dash-dot when it mixes
-    kinds, dotted when that kind is a dlin, dgin, dsage or dgat, and solid otherwise."""
+    its last hook, or of pg or bld when it holds either, and the marker of its joined hook set (a star for tree
+    search). Its line is dashed with a tilt, else dash-dot when it mixes kinds, dotted when that kind is a dlin,
+    dgin, dsage or dgat, and solid otherwise."""
     if method.startswith("gls"):
         return COLORS[method], "o", "-"
     if method.startswith("cma-"):
         return COLORS["cma"], MARKERS["h2"], "-"
     parts = parse_method(method)
-    kind = max(parts, key=lambda p: p[1])[0]
+    kind = next((k for k, _ in parts if k in ("pg", "bld")), None) or max(parts, key=lambda p: p[1])[0]
     marker = MARKERS["mcts" if search_of(method) is not None else "".join(sorted({h for _, h in parts}))]
-    return COLORS[kind], marker, "-." if len({k for k, _ in parts}) > 1 else ":" if kind[0] == "d" else "-"
+    style = ("--" if tilt_of(method) is not None else "-." if len({k for k, _ in parts}) > 1
+             else ":" if kind[0] == "d" else "-")
+    return COLORS[kind], marker, style
 
 
 def plot(summary, out_dir, runs_key="quantum_runs", methods=None) -> list[Path]:

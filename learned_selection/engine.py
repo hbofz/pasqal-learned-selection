@@ -22,6 +22,7 @@ Branch = tuple[nx.Graph, list]                                   # (remaining gr
 Pruner = Callable[[list[Branch], int], list[Branch]]             # (next level, solver children) -> kept
 Rank = Callable[[nx.Graph, list[Mapping]], Sequence[float]]      # (current graph, candidate pieces) -> one rank each
 Value = Callable[[list[nx.Graph]], Sequence[float]]              # remaining graphs of a level -> predicted value-to-go each
+Builder = Callable[[nx.Graph], list[Mapping]]                    # current graph -> candidate pieces, in place of growth
 
 
 @dataclass
@@ -58,9 +59,10 @@ def vendored_gls_generator(coords=None, blockade=BLOCKADE_UM, seed=0) -> Generat
 
 
 def gls_generator(coords=None, blockade=BLOCKADE_UM, seed=0, score: VertexScore | None = None,
-                  rank: Rank | None = None) -> Generator:
+                  rank: Rank | None = None, build: Builder | None = None) -> Generator:
     """GLS as the vendored code runs it: grow a piece from every vertex, keep the k of highest rank
-    (by default the k largest). `score` replaces the vertex priority used during growth."""
+    (by default the k largest). `score` replaces the vertex priority used during growth. `build` replaces growth
+    altogether: its pieces for the graph are ranked as grown ones are, and `score` is not read."""
     coords = load_coords() if coords is None else coords
     _check_trap_order(coords)
     adj, avg_degree = lattice_adjacency(coords, blockade)
@@ -68,8 +70,11 @@ def gls_generator(coords=None, blockade=BLOCKADE_UM, seed=0, score: VertexScore 
     make_scorer = score or gls_score(avg_degree)
 
     def generate(g: nx.Graph, k: int) -> list[Mapping]:
-        scorer = make_scorer(g)
-        maps = [grow_piece(g, v, adj, start_trap, random.Random(seed), scorer) for v in g.nodes()]
+        if build is not None:
+            maps = build(g)
+        else:
+            scorer = make_scorer(g)
+            maps = [grow_piece(g, v, adj, start_trap, random.Random(seed), scorer) for v in g.nodes()]
         ranks = [len(m) for m in maps] if rank is None else rank(g, maps)
         return [maps[i] for i in sorted(range(len(maps)), key=ranks.__getitem__, reverse=True)[:k]]
     return generate
@@ -190,10 +195,12 @@ def run_code_faithful(graph: nx.Graph, k: int, s: int, l: int, solve: PieceSolve
 
 def run_code_bounded(graph: nx.Graph, k: int, s: int, l: int, score: VertexScore | None = None,
                      rank: Rank | None = None, solve: PieceSolver = exact_piece_solver, seed: int = 0,
-                     small: int = 5, max_branches: int = 1_000, value: Value | None = None) -> RunResult:
+                     small: int = 5, max_branches: int = 1_000, value: Value | None = None,
+                     build: Builder | None = None) -> RunResult:
     """The code loop with a pruner that also counts small-piece children, so graphs that split into many
-    small pieces (isolated vertices, say) stay bounded. `score` and `rank` are the generator's hooks, `value` the pruner's."""
-    return run_beam(graph, gls_generator(seed=seed, score=score, rank=rank), solve, k, s,
+    small pieces (isolated vertices, say) stay bounded. `score`, `rank` and `build` are the generator's hooks,
+    `value` the pruner's."""
+    return run_beam(graph, gls_generator(seed=seed, score=score, rank=rank, build=build), solve, k, s,
                     code_prune(k, l, count_small=True, value=value), small, max_branches)
 
 

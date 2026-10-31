@@ -47,3 +47,9 @@ def test_main_resumes_past_finished_steps(tmp_path, monkeypatch):
     dagger.main(["--stack", "lin", "--iters", "1", "--base-train", "b.pkl", "--base-val", "v.pkl",
                  "--out", str(out), "--cache", str(cache), "--workers", "2", "--threads", "1"])
     assert seen == []
+
+def test_builder_stack_rolls_out_the_picked_builder():
+    cmds = commands("bld", 1, ["b.pkl"], ["v.pkl"], "M", "C", 24, 6)
+    assert "--policy bld-h3+dgin-h4+dgin-h5" in " ".join(cmds[0]) and "--jobs bgin-h4,bgin-h5" in " ".join(cmds[2])
+    cmds = commands("bld", 2, ["b.pkl"], ["v.pkl"], "M", "C", 24, 6)
+    assert "--policy bld-h3+bgin-h4+bgin-h5" in " ".join(cmds[0])

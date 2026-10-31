@@ -121,3 +121,9 @@ def test_label_graphs_with_a_policy_uses_its_hooks(tmp_path):
 def test_label_graphs_refuses_selection_seeds():
     with pytest.raises(ValueError):
         label_graphs("er", {"p": 0.1}, 40, 105)
+
+def test_state_record_uses_the_build_hook():
+    G = make("er", 30, 3, p=0.2)
+    build = lambda g: [{v: 32} for v in g]
+    rec = state_record(G, True, 20.0, 1, build=build)
+    assert all(len(p) == 1 for p in rec["pieces"]) and len(rec["pieces"]) == 30

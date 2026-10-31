@@ -144,3 +144,30 @@ def test_an_unknown_name_has_no_runner():
     from learned_selection.bench import method_runner
     with pytest.raises(ValueError):
         method_runner("foo-h2", None)
+
+
+def test_parse_method_with_builder_and_tilt():
+    from learned_selection.bench import tilt_of
+    assert parse_method("bld-h3+dgin-h4+dgin-h5") == [("bld", "h3"), ("dgin", "h4"), ("dgin", "h5")]
+    assert parse_method("dgin-h2h4h5+tilt-0.1") == [("dgin", "h2"), ("dgin", "h4"), ("dgin", "h5")]
+    assert parse_method("bld-h3+sage-h4+dsage-h5+mcts-c0.5")[0] == ("bld", "h3")
+    assert tilt_of("dgin-h2h4h5+tilt-0.1") == 0.1 and tilt_of("dgin-h2h4h5") is None
+    assert known_method("dgin-h2+pg-h4+dgin-h5") and known_method("bld-h3+bgin-h4+bgin-h5")
+    for bad in ("gin-h3", "bld-h2", "bld-h3+gin-h2+gin-h4", "lin-h2+tilt-0.1", "dgin-h2h4h5+tilt-0.1+mcts",
+                "dgin-h2h4h5+mcts+tilt-0.1", "bld-h3+gin-h4+mcts", "tilt-0.1"):
+        with pytest.raises(ValueError):
+            parse_method(bad)
+
+
+def test_tilt_adds_beta_times_size_to_the_rank(tmp_path):
+    import networkx as nx
+    from learned_selection.bench import method_hooks
+    rng = np.random.default_rng(0)
+    for hook, d in (("h2", len(VERTEX_FEATURES)), ("h4", len(PIECE_FEATURES))):
+        X, g, y = rng.standard_normal((60, d)), np.repeat(np.arange(6), 10), rng.integers(0, 3, 60)
+        save(fit_linear(X, y, g), tmp_path / f"lin-{hook}.json")
+    G = nx.path_graph(6)
+    maps = [{0: 0}, {1: 0, 2: 1, 3: 2}]
+    plain = method_hooks("lin-h2h4", tmp_path)["rank"](G, maps)
+    tilted = method_hooks("lin-h2h4+tilt-0.5", tmp_path)["rank"](G, maps)
+    assert np.allclose(np.asarray(tilted) - np.asarray(plain), [0.5, 1.5], atol=1e-9)

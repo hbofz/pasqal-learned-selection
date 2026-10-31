@@ -3,7 +3,8 @@ import argparse, pickle, subprocess, sys, time
 from pathlib import Path
 
 STACKS = {"lin": dict(start="lin-h2h4+sage-h5", policy="dlin-h2h4+dsage-h5", jobs="dlin-h2,dlin-h4,dsage-h5"),
-          "gin": dict(start="gin-h2h4h5", policy="dgin-h2h4h5", jobs="dgin-h2,dgin-h4,dgin-h5")}
+          "gin": dict(start="gin-h2h4h5", policy="dgin-h2h4h5", jobs="dgin-h2,dgin-h4,dgin-h5"),
+          "bld": dict(start="bld-h3+dgin-h4+dgin-h5", policy="bld-h3+bgin-h4+bgin-h5", jobs="bgin-h4,bgin-h5")}
 
 
 def commands(stack, t, base_train, base_val, out, cache, workers, threads, max_states=8, shard=None):

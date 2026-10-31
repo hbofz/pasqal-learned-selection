@@ -8,7 +8,7 @@ import math, time
 import networkx as nx
 import numpy as np
 
-from .engine import RunResult, Rank, Value, _remove_closed, exact_piece_solver, gls_generator
+from .engine import Builder, RunResult, Rank, Value, _remove_closed, exact_piece_solver, gls_generator
 from .growth import VertexScore
 from .lattice import is_valid_piece, lattice_graph, load_coords
 from .solvers import canonical, first_maximum_set, is_independent
@@ -29,13 +29,16 @@ class _Node:
         self.tr = None   # with a trace: the generator's list, the indices expanded and unsolved, their children
 
 
-def run_mcts(graph: nx.Graph, k: int, s: int, budget: int, score: VertexScore, rank: Rank, value: Value,
-             c: float = 1.0, solve=exact_piece_solver, seed: int = 0, small: int = 5, trace: list | None = None,
-             noise: tuple | None = None) -> RunResult:
+def run_mcts(graph: nx.Graph, k: int, s: int, budget: int, score: VertexScore | None = None, rank: Rank | None = None,
+             value: Value | None = None, c: float = 1.0, solve=exact_piece_solver, seed: int = 0, small: int = 5,
+             trace: list | None = None, noise: tuple | None = None, build: Builder | None = None) -> RunResult:
     """Search until `budget` solves are counted or the tree is exhausted, then dive along the most visited children
-    to a terminal. The answer is the largest complete set seen. `trace` and `noise` are for self-play: with a list,
+    to a terminal. The answer is the largest complete set seen. `rank` and `value` are required, and so is one of
+    `score` and `build` (a builder replaces growth). `trace` and `noise` are for self-play: with a list,
     one dict per node of at least TRACE_VISITS visits is appended at the end; with (eps, alpha, rng), the root's
     priors are mixed with Dirichlet(alpha) noise when it expands. Neither changes the search otherwise."""
+    if rank is None or value is None or (score is None and build is None):
+        raise ValueError("tree search needs rank and value hooks, and a score or build hook")
     start = time.perf_counter()
     L = lattice_graph(load_coords())
     if all(type(v) is int for v in graph):
@@ -51,7 +54,7 @@ def run_mcts(graph: nx.Graph, k: int, s: int, budget: int, score: VertexScore, r
         scores.update((id(m), x) for m, x in zip(maps, out))
         return out
 
-    generate = gls_generator(score=score, rank=capture, seed=seed)
+    generate = gls_generator(score=score, rank=capture, seed=seed, **({} if build is None else dict(build=build)))
     best: list = []
     quantum_runs = pasqal_runs = atoms = deepest = 0
     run_sizes: list[int] = []

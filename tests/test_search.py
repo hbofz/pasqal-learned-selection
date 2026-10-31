@@ -274,3 +274,17 @@ def test_mcts_keeps_the_largest_answer_seen_and_ends_with_the_tree(monkeypatch):
 def test_mcts_keeps_only_the_first_k_pieces(monkeypatch):
     r, solved = scripted(monkeypatch, MATCHING, [(A, 0.5), (B, 0.3), (C, 0.2)], SOLS, {}, 40, k=2)
     assert C not in solved and B in solved
+
+
+def test_mcts_takes_a_build_hook():
+    G = erdos_renyi(30, 0.2, 2)
+    build = lambda g: [{v: 32} for v in g]
+    r = run_mcts(G, 4, 2, 10, score, rank, value, build=build)
+    assert is_independent(G, r.solution) and all(x == 1 or x <= 5 for x in r.run_sizes)
+
+
+def test_mcts_needs_rank_value_and_a_way_to_grow():
+    G = erdos_renyi(20, 0.2, 1)
+    for kw in (dict(score=score, value=value), dict(score=score, rank=rank), dict(rank=rank, value=value)):
+        with pytest.raises(ValueError):
+            run_mcts(G, 4, 2, 5, **kw)

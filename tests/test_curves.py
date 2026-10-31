@@ -1,6 +1,6 @@
 import json, pytest
-from learned_selection.curves import (_print_settings, _stats, _tables, curve_gain, envelope, gap_at, headline, main,
-                                      plot, runs_at, summarize)
+from learned_selection.curves import (COLORS, PAIRED_MARGIN, _print_settings, _stats, _style, _tables, curve_gain,
+                                      envelope, gap_at, headline, main, paired_gain, plot, runs_at, summarize)
 from learned_selection.instances import (HELD_OUT_SETTINGS, SEL_SEEDS, TEST_SEEDS, TEST_SIZES, TRAIN_SETTINGS,
                                          VAL_SEEDS)
 
@@ -178,3 +178,59 @@ def test_load_passes_exact_duplicates_and_names_conflicting_records(tmp_path):
                              for r in rows))
         with pytest.raises(ValueError, match="lin-h4"):
             load([a, b])
+
+
+def test_style_and_plot_take_tilt_builder_and_policy_gradient_names(tmp_path):
+    names = ["dgin-h2h4h5+tilt-0.1", "dgin-h2+pg-h4+dgin-h5", "bld-h3+bgin-h4+bgin-h5"]
+    rows = [dict(family="er", params={"p": 0.25}, n=100, method=m, k=k, s=2, l=10, restarts=1, gap=g, gap_lo=g - 1,
+                 gap_hi=g + 1, quantum_runs=r, pasqal_runs=r)
+            for m in ("gls", *names) for k, r, g in ((2, 10, 9.0), (4, 30, 7.0))]
+    assert len(plot(rows, tmp_path)) == 1
+    assert _style("dgin-h2h4h5+tilt-0.1") != _style("dgin-h2h4h5")
+    assert _style("dgin-h2h4h5+tilt-0.1")[2] == "--"
+    assert _style("dgin-h2+pg-h4+dgin-h5")[0] == _style("bld-h3+bgin-h4+bgin-h5")[0] == COLORS["az"]
+    assert _style("bld-h3+bgin-h4+bgin-h5")[1] == "X" and _style("bgin-h2h4h5")[0] == COLORS["gin"]
+
+
+def _pair_rows(cell, seeds, method, base, config=(4, 2, 10)):
+    """The method's and the baseline's (runs, gap) on each seed as rows at one config; best known 100."""
+    (f, p, n), (k, s, l) = cell, config
+    return [dict(family=f, params=p, n=n, seed=i, method=m, k=k, s=s, l=l, restarts=1, exploded=False,
+                 quantum_runs=r, pasqal_runs=r, over_30=0, gap_pct=g, size=100 - g)
+            for i, a, b in zip(seeds, method, base) for m, (r, g) in (("m", a), ("gls", b))]
+
+
+def test_paired_gain_by_hand():
+    cell, seeds = (FA, PA, TEST_SIZES[0]), TEST_SEEDS
+    base = [(100, 5.0)] * len(seeds)
+    for method, ratio, d, verdict in (([(50, 5.0)] * len(seeds), 0.5, 0.0, "saves runs"),
+                                      ([(100, 6.0)] * len(seeds), 1.0, 1.0, "costs gap"),
+                                      (base, 1.0, 0.0, "no clear change")):
+        (h,) = paired_gain(_pair_rows(cell, seeds, method, base), "m", "gls", reps=50)
+        assert (h["pool"], h["cells"], h["instances"], h["no_runs"]) == ("training", 1, len(seeds), 0)
+        assert h["run_ratio"] == pytest.approx(ratio) and h["d_gap"] == pytest.approx(d)
+        assert h["run_ratio_lo"] == pytest.approx(ratio) and h["d_gap_hi"] == pytest.approx(d)
+        assert h["verdict"] == verdict
+    assert PAIRED_MARGIN == 0.25
+
+
+def test_paired_gain_leaves_out_exploded_and_zero_run_instances():
+    cell, seeds = (FA, PA, TEST_SIZES[0]), TEST_SEEDS[:4]
+    method = [(50, 5.0), (0, 9.0), (200, 5.0), (80, 7.0)]      # seed 1 made no runs, seed 3 exploded
+    rows = _pair_rows(cell, seeds, method, [(100, 5.0)] * 4)
+    for r in rows:
+        r["exploded"] = r["method"] == "m" and r["seed"] == seeds[3]
+    (h,) = paired_gain(rows, "m", "gls", reps=50)
+    assert h["instances"] == 3 and h["no_runs"] == 1
+    assert h["run_ratio"] == pytest.approx(1.0)                # geometric mean of 0.5 and 2
+    assert h["d_gap"] == pytest.approx(4 / 3)                  # (0 + 4 + 0) / 3: the zero-run instance still counts
+    assert paired_gain(rows, "m", "gls", seeds=VAL_SEEDS) == []
+
+
+def test_paired_gain_reads_the_baseline_at_its_own_config():
+    cell, seeds = (FA, PA, TEST_SIZES[0]), TEST_SEEDS[:4]
+    ours = [r for r in _pair_rows(cell, seeds, [(50, 5.0)] * 4, [(0, 0.0)] * 4, config=(2, 2, 5)) if r["method"] == "m"]
+    theirs = [r for r in _pair_rows(cell, seeds, [(0, 0.0)] * 4, [(100, 5.0)] * 4) if r["method"] == "gls"]
+    assert paired_gain(ours + theirs, "m", "gls", config=(2, 2, 5, 1), reps=50) == []
+    (h,) = paired_gain(ours + theirs, "m", "gls", config=(2, 2, 5, 1), base_config=(4, 2, 10, 1), reps=50)
+    assert h["run_ratio"] == pytest.approx(0.5) and h["d_gap"] == pytest.approx(0.0)

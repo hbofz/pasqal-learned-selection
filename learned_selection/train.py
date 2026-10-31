@@ -376,10 +376,10 @@ def _jobs(spec: str) -> list[tuple[str, str, str]]:
     jobs = []
     for job in spec.split(","):
         conv, _, hook = job.partition("-")
-        if conv.startswith("d") and conv[1:] in (*CONVS, "lin"):   # d: trained on a policy's own states
+        if conv[:1] in ("d", "b") and conv[1:] in (*CONVS, "lin"):   # d, b: trained on a policy's own states
             conv = conv[1:]
         if hook not in ("h2", "h4", "h5") or conv not in (*CONVS, "lin"):
-            raise SystemExit(f"unknown job {job!r}; use [d]{{lin,{','.join(CONVS)}}}-h2|h4|h5")
+            raise SystemExit(f"unknown job {job!r}; use [d|b]{{lin,{','.join(CONVS)}}}-h2|h4|h5")
         jobs.append((job, conv, hook))
     return jobs
 
@@ -388,7 +388,7 @@ def main(argv=None) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--train", nargs="+", required=True)
     ap.add_argument("--val", nargs="+", required=True)
-    ap.add_argument("--jobs", required=True, help="comma-separated: conv-h2|h4|h5 or lin-h2|h4|h5; a leading d marks a policy's own states")
+    ap.add_argument("--jobs", required=True, help="comma-separated: conv-h2|h4|h5 or lin-h2|h4|h5; a leading d or b marks a policy's or a builder's own states")
     ap.add_argument("--out", required=True)
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--epochs", type=int, default=60)
