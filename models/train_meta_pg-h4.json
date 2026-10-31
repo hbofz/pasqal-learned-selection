@@ -1,0 +1,12 @@
+{
+  "iter": 160,
+  "iters": 160,
+  "c": 0.03,
+  "seed": 0,
+  "lr": 0.0003,
+  "stack": "dgin-h2+dgin-h5",
+  "init": "models/dgin-h4.pt",
+  "cpu_s": 22245.678792,
+  "wall_s": 2170.9536519270005,
+  "commit": "8908bed"
+}

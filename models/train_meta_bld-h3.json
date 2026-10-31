@@ -1,0 +1,22 @@
+{
+  "iter": 200,
+  "iters": 400,
+  "init": "models/bld/clone_s0/bld-h3.pt",
+  "rank": "dgin-h4",
+  "value": "dgin-h5",
+  "seed": 0,
+  "lr": 0.0001,
+  "states": 128,
+  "starts": 8,
+  "samples": 2,
+  "min_n": 20,
+  "train": [
+    "cache/graphs_train_shard0of3.pkl",
+    "cache/graphs_train_shard1of3.pkl",
+    "cache/graphs_train_shard2of3.pkl",
+    "cache/dagger/gin/it2_train.pkl"
+  ],
+  "max_states": null,
+  "cpu_s": 7496.977821000001,
+  "commit": "8908bed"
+}
