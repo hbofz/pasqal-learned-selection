@@ -1,13 +1,14 @@
 import networkx as nx, numpy as np, pytest, torch
 from learned_selection import builder, solvers
 from learned_selection.bench import run_instance
-from learned_selection.builder import (PAIR_FEATURES, PieceBuilder, build_piece, builder_hook, load_builder, pair_options,
-                                       pair_weights, save_builder, trap_features)
+from learned_selection.builder import (PAIR_FEATURES, PieceBuilder, build_piece, builder_hook, clone_examples, clone_fit,
+                                       decision_loss, load_builder, main, one_step_reward, pair_options, pair_weights,
+                                       rollout_job, save_builder, start_advantages, trap_features)
 from learned_selection.cloud import EMULATION_DEVICE, piece_sequence
 from learned_selection.engine import run_code_bounded
 from learned_selection.features import GRAPH_FEATURES, PIECE_FEATURES
-from learned_selection.gnn import GNN, encode
-from learned_selection.growth import code_start_trap, lattice_adjacency
+from learned_selection.gnn import GNN, encode, save_gnn
+from learned_selection.growth import code_start_trap, gls_score, lattice_adjacency
 from learned_selection.instances import erdos_renyi, power_law, sbm
 from learned_selection.lattice import is_valid_piece, lattice_graph, load_coords
 from learned_selection.models import fit_linear, fit_value_linear, save
@@ -193,3 +194,144 @@ def test_bench_routes_a_builder_name(tmp_path):
         (r,) = run_instance("er", {"p": 0.1}, 40, 0, [name], widths=[width], restarts=[1], time_limit_s=10,
                             models_dir=tmp_path)
         assert KEYS <= r.keys() and r["track"] == "structure" and r["size"] > 0 and not r["exploded"]
+
+
+def _rec(n, p, seed, **kw):
+    G = erdos_renyi(n, p, seed)
+    return dict(n=n, edges=np.array(G.edges(), dtype=np.int32).reshape(-1, 2), setting="er(p=0.1)", seed=seed, **kw)
+
+
+def _gls_factory():
+    return gls_score(lattice_adjacency(load_coords())[1])
+
+
+def test_clone_examples_replay_the_expert_placement():
+    n, edges, ds = clone_examples(_rec(30, 0.2, 1), _gls_factory(), *_lattice())
+    assert n == 30 and len(edges) and ds and all(0 <= c < len(idx) for idx, _, c in ds)    # the expert's pair is among the options
+    assert all(phi.shape == (len(idx), len(PAIR_FEATURES)) for idx, phi, _ in ds)
+
+
+def test_decision_loss_matches_a_written_out_softmax():
+    rec, net = _rec(20, 0.2, 3), _net()
+    idx, phi = np.array([2, 5, 7]), np.random.default_rng(0).random((3, len(PAIR_FEATURES))).astype(np.float32)
+    ds = [(idx, phi, 1), (idx[:2], phi[:2], 0)]
+    loss, logits = decision_loss(net, rec["n"], rec["edges"], ds, np.array([2.0, -0.5]))
+    z = logits.numpy()
+    logp = [z[1] - np.log(np.exp(z[:3]).sum()), z[3] - np.log(np.exp(z[3:]).sum())]
+    assert float(loss) == pytest.approx(-(2.0 * logp[0] - 0.5 * logp[1]) / 2, abs=1e-5)
+    assert not logits.requires_grad and loss.requires_grad
+
+
+def test_cloning_raises_agreement_on_the_expert():
+    examples = [clone_examples(_rec(25, 0.15, s), _gls_factory(), *_lattice()) for s in range(3)]
+    history = clone_fit(_net(1).train(), examples, epochs=30, seed=0)
+    assert len(history) == 30 and history[-1][1] > history[0][1] and history[-1][0] < history[0][0]
+
+
+def test_one_step_reward_uses_the_engine_sets_and_the_value():
+    G = nx.path_graph(8); nx.set_node_attributes(G, 1, "weight")
+    assert one_step_reward(G, {0: 32, 1: 33}, lambda gs: [len(g) for g in gs]) == 1 + 6     # one vertex taken, six left
+    H = nx.empty_graph(9); H.add_edges_from([(0, 1), (2, 3), (4, 5)]); nx.set_node_attributes(H, 1, "weight")
+    big = {v: 30 + v for v in range(6)}                                                      # over small: the top 2 sets
+    assert one_step_reward(H, big, lambda gs: [len(g) for g in gs]) == 3 + 3                 # any maximum set leaves 6, 7, 8
+    assert one_step_reward(G, {v: v for v in range(8)}, lambda gs: [len(g) for g in gs]) == 4   # nothing left
+
+
+def test_start_advantages_centre_per_start_and_scale_by_the_batch():
+    adv = start_advantages([1.0, 3.0, 10.0, 10.0], [("s", 0), ("s", 0), ("s", 1), ("s", 1)])
+    assert adv[0] < 0 < adv[1] and adv[2] == adv[3] == 0
+    assert adv[1] == pytest.approx(1 / np.std([-1.0, 1.0, 0.0, 0.0]))
+    assert (start_advantages([5.0, 5.0], [(0, 1), (0, 1)]) == 0).all()      # equal rewards: zeros, not NaN
+
+
+def test_rl_step_moves_mass_towards_the_better_pair():
+    rec, net = _rec(20, 0.2, 3), _net()
+    idx, phi = np.array([2, 5]), np.random.default_rng(0).random((2, len(PAIR_FEATURES))).astype(np.float32)
+    ds = [(idx, phi, 0), (idx, phi, 1)]
+    opt = torch.optim.Adam(net.parameters(), lr=1e-2)
+    before = decision_loss(net, rec["n"], rec["edges"], ds, np.array([1.0, -1.0]))[1]
+    for _ in range(3):
+        opt.zero_grad()
+        decision_loss(net, rec["n"], rec["edges"], ds, np.array([1.0, -1.0]))[0].backward()
+        opt.step()
+    after = decision_loss(net, rec["n"], rec["edges"], ds, np.array([1.0, -1.0]))[1]
+    assert after[0] - after[1] > before[0] - before[1]
+
+
+def _models(path):
+    body = lambda head: GNN("gin", head, np.zeros(9), np.ones(9), np.zeros(len(PIECE_FEATURES)), np.ones(len(PIECE_FEATURES)))
+    torch.manual_seed(5)
+    save_gnn(body("piece"), path / "gin-h4.pt")
+    save_gnn(body("value"), path / "gin-h5.pt")
+    save_gnn(body("vertex"), path / "gin-h2.pt")
+    return path
+
+
+def _write_states(path, states):
+    import pickle
+    path.write_bytes(pickle.dumps(dict(meta={}, states=states)))
+    return str(path)
+
+
+def test_rollout_job_returns_numpy_rows_with_rewards_and_decisions(tmp_path):
+    _models(tmp_path)
+    rec, net = _rec(30, 0.15, 2), _net()
+    blob = builder.blob_of(net)
+    n, edges, rows = rollout_job((blob, rec["n"], rec["edges"], 3, 2, 7, "gin-h5", "gin-h4", str(tmp_path)))
+    assert n == 30 and len(rows) == 6 and len({r[0] for r in rows}) == 3
+    assert all(isinstance(r[1], float) and r[2] == len(r[3]) + 1 for r in rows)
+    again = rollout_job((blob, rec["n"], rec["edges"], 3, 2, 7, "gin-h5", "gin-h4", str(tmp_path)))[2]
+    assert [r[:3] for r in rows] == [r[:3] for r in again]                   # the seed fixes the rollout
+
+
+def _rl_args(tmp_path, out, iters, init):
+    return ["rl", "--init", str(init), "--value", "gin-h5", "--rank", "gin-h4", "--models", str(tmp_path), "--train",
+            str(tmp_path / "s.pkl"), "--iters", str(iters), "--states", "2", "--starts", "2", "--samples", "2", "--min-n", "20",
+            "--every", "2", "--seed", "3", "--out", str(out), "--threads", "1", "--workers", "1"]
+
+
+def test_rl_resume_matches_an_unbroken_run(tmp_path):
+    _models(tmp_path)
+    _write_states(tmp_path / "s.pkl", [_rec(24, 0.15, s) for s in range(4)])
+    save_builder(_net(), tmp_path / "init.pt")
+    main(_rl_args(tmp_path, tmp_path / "straight", 4, tmp_path / "init.pt"))
+    main(_rl_args(tmp_path, tmp_path / "broken", 2, tmp_path / "init.pt"))
+    assert not (tmp_path / "broken" / "it4").exists()
+    main(_rl_args(tmp_path, tmp_path / "broken", 4, tmp_path / "init.pt"))
+    a, b = load_builder(tmp_path / "straight" / "it4" / "bld-h3.pt"), load_builder(tmp_path / "broken" / "it4" / "bld-h3.pt")
+    for x, y in zip(a.state_dict().values(), b.state_dict().values()):
+        assert torch.allclose(x, y, atol=1e-6)
+    start = load_builder(tmp_path / "init.pt")
+    assert any(not torch.allclose(x, y, atol=1e-6) for x, y in zip(a.state_dict().values(), start.state_dict().values()))
+    import json
+    lines = [json.loads(l) for l in (tmp_path / "broken" / "log.jsonl").read_text().splitlines()]
+    assert [l["iter"] for l in lines] == [1, 2, 3, 4]
+    state = torch.load(tmp_path / "broken" / "state.pt", weights_only=True)
+    assert state["t"] == 4 and state["cpu_s"] > 0
+    for f in ("bld-h3.pt", "gin-h4.pt", "gin-h5.pt"):                       # so --models resolves bld-h3+gin-h4+gin-h5
+        assert (tmp_path / "broken" / "it2" / f).exists()
+
+
+def test_clone_writes_the_model_with_its_companions(tmp_path):
+    _models(tmp_path)
+    _write_states(tmp_path / "s.pkl", [_rec(24, 0.15, s) for s in range(3)])
+    main(["clone", "--expert", "gin-h2", "--rank", "gin-h4", "--value", "gin-h5", "--models", str(tmp_path), "--train",
+          str(tmp_path / "s.pkl"), "--epochs", "1", "--seed", "1", "--out", str(tmp_path / "c"), "--threads", "1",
+          "--workers", "1"])
+    out = tmp_path / "c"
+    assert sorted(p.name for p in out.iterdir()) == ["bld-h3.pt", "gin-h4.pt", "gin-h5.pt", "train_meta_bld-h3.json"]
+    import json
+    meta = json.loads((out / "train_meta_bld-h3.json").read_text())
+    assert meta["seed"] == 1 and meta["states"] == 3 and meta["cpu_s"] > 0 and "commit" in meta
+    assert load_builder(out / "bld-h3.pt").pair[0].weight.shape[1] == 64 + len(PAIR_FEATURES)
+
+
+def test_training_refuses_every_seed_outside_training(tmp_path):
+    _models(tmp_path)
+    for seed in (105, 1000, 100):
+        path = _write_states(tmp_path / f"s{seed}.pkl", [_rec(24, 0.15, 0), _rec(24, 0.15, 1) | dict(seed=seed)])
+        with pytest.raises(ValueError):
+            main(["clone", "--expert", "gin-h2", "--models", str(tmp_path), "--train", path, "--out", str(tmp_path / "o")])
+    save_builder(_net(), tmp_path / "init.pt")
+    with pytest.raises(ValueError):
+        main(["rl", "--init", str(tmp_path / "init.pt"), "--models", str(tmp_path), "--train", path, "--out", str(tmp_path / "o")])
