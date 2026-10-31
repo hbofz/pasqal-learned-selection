@@ -39,7 +39,8 @@ CLASSICAL_METHODS = ["greedy-pasqal", "greedy-mindeg", "exact"]
 # Selectors that choose among other methods and widths; their names have no hooks, so parse_method refuses them.
 BANDIT_METHODS = ("bandit-i", "bandit-r")
 KIND_EXT = {"lin": ".json", "lgb": ".txt", "gin": ".pt", "sage": ".pt", "gat": ".pt", "dlin": ".json", "dgin": ".pt",
-            "dsage": ".pt", "dgat": ".pt", "az": ".pt", "pg": ".pt", "bgin": ".pt", "bld": ".pt"}
+            "dsage": ".pt", "dgat": ".pt", "az": ".pt", "pg": ".pt", "bgin": ".pt", "bld": ".pt",
+            "gfn": ".pt"}
 GNN_KINDS = ("gin", "sage", "gat", "dgin", "dsage", "dgat", "az", "pg", "bgin")
 LINEAR_KINDS = ("lin", "dlin")
 SEARCH = re.compile(r"mcts(?:-c(\d+(?:\.\d+)?))?")
@@ -87,7 +88,7 @@ def _model(path: Path):
     """Each model file is read once per process."""
     if path.suffix == ".pt":
         load_gnn = _gnn_loader()     # also sets torch to one thread, which the builder needs as well
-        if path.name.startswith("bld-"):
+        if path.name.startswith(("bld-", "gfn-")):
             from .builder import load_builder
             return load_builder(path)
         return load_gnn(path)
@@ -99,7 +100,7 @@ def parse_method(name: str) -> list[tuple[str, str]]:
     written. A trailing "tilt-<float>" part is dropped, and then h4 must be given. A trailing "mcts" or
     "mcts-c<float>" part is dropped, and then h4, h5 and one of h2 and h3 must be given. Raises ValueError on an
     unknown kind, a malformed or repeated hook, lgb with h5 (there is no LightGBM value model), exact with any hook
-    but h5, h3 with any kind but bld (which has no other hook), h2 with h3, or a tilt with tree search."""
+    but h5, h3 with any kind but bld and gfn (which have no other hook), h2 with h3, or a tilt with tree search."""
     out, parts = [], name.split("+")
     tilted = TILT.fullmatch(parts[-1]) is not None
     if tilted:
@@ -115,7 +116,7 @@ def parse_method(name: str) -> list[tuple[str, str]]:
         for hook in filter(None, found.groups()):
             if (kind == "lgb" and hook == "h5") or (kind == "exact" and hook != "h5"):
                 raise ValueError(f"{name!r}: no {kind} model for {hook}")
-            if (kind == "bld") != (hook == "h3"):
+            if (kind in ("bld", "gfn")) != (hook == "h3"):
                 raise ValueError(f"{name!r}: h3 is the builder's hook, and the builder has no other")
             if hook in (h for _, h in out):
                 raise ValueError(f"{name!r}: {hook} given twice")
@@ -165,6 +166,9 @@ def _hook(kind: str, hook: str, d: Path):
     if kind == "bld":
         from . import builder     # torch is already loaded: the model above is a .pt file
         return keyword, builder.builder_hook(model)
+    if kind == "gfn":
+        from . import gfn
+        return keyword, gfn.gfn_hook(model)
     if kind in GNN_KINDS:
         from . import gnn     # torch is already loaded: the model above is a .pt file
         head = {"h2": "vertex", "h4": "piece", "h5": "value"}[hook]
