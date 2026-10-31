@@ -6,19 +6,27 @@ reads the features, runs the arm of largest predicted reward for real, and that 
 
     uv run python -m learned_selection.bandit fit --records 'results/train*.jsonl' --out models/bandit-i.json
 
-This module never imports torch: `bench` imports it lazily, and it reaches the arms' models through
-`bench.method_runner`.
+`bandit-r` picks (k, s, beam) again at the start of every round of one beam over the policy-gradient stack, with a
+linear bandit per arm on eight numbers of the current level. An episode's reward is the final size minus c times the
+quantum runs, less the stack's predicted value of the root graph, credited to every round's choice.
+
+    uv run python -m learned_selection.bandit round --cost 0.01 --out cache/bandit-r --workers 18
+
+This module never imports torch at the top: `bench` imports it lazily, and it reaches the models through
+`bench.method_runner` and `bench.method_hooks`.
 """
-import argparse, glob, json, os
+import argparse, functools, glob, json, math, os, random, time
 from pathlib import Path
 
+import networkx as nx
 import numpy as np
 
 from . import dataset
-from .bench import method_runner
+from .bench import method_hooks, method_runner
 from .curves import load
+from .engine import exact_piece_solver, gls_generator, run_beam
 from .features import graph_features
-from .instances import TRAIN_SEEDS, TRAIN_SETTINGS, make
+from .instances import TRAIN_SEEDS, TRAIN_SETTINGS, TRAIN_SIZES, make
 
 MENU = [("bld-h3+pg-h4+dgin-h5", 1, 1, 1), ("bld-h3+pg-h4+dgin-h5", 2, 2, 5),
         ("bld-h3+pg-h4+dgin-h5", 4, 2, 10), ("bld-h3+pg-h4+dgin-h5", 8, 3, 30),
@@ -26,6 +34,11 @@ MENU = [("bld-h3+pg-h4+dgin-h5", 1, 1, 1), ("bld-h3+pg-h4+dgin-h5", 2, 2, 5),
         ("bld-h3+sage-h4+dsage-h5+mcts-c0.5", 4, 2, 50), ("bld-h3+sage-h4+dsage-h5+mcts-c0.5", 4, 2, 100)]
 COSTS = (0.001, 0.003, 0.01, 0.03)
 LOGGED = (0, 1, 3, 5, 6)     # n, edges, caro_wei, deg_max, deg_mean among graph_features
+ROUND_STACK = "bld-h3+pg-h4+dgin-h5"
+ROUND_ARMS = ((1, 1, 1), (2, 2, 2), (4, 2, 4), (8, 3, 8))     # (k, s, beam)
+ROUND_COSTS = (0.003, 0.01, 0.03)
+ROUND_D = 8
+FIXED_ARM_L = 9000     # l = FIXED_ARM_L + 1 + j runs arm j in every round, with no theta
 
 
 def context(G) -> np.ndarray:
@@ -109,8 +122,104 @@ def instance_runner(models_dir):
     return run
 
 
+def round_context(level, n0, runs, rnd) -> np.ndarray:
+    """Eight numbers of the current level of (graph, partial solution) branches, each scaled by the input size n0: a
+    constant, mean size, mean density, log of the branch count, the round, solves so far, mean partial size, and size
+    times density. Zeros for an empty level. Reads sizes and densities only, no independent set."""
+    if not level:
+        return np.zeros(ROUND_D)
+    n0 = max(1, n0)
+    size, density = np.mean([len(g) for g, _ in level]) / n0, np.mean([nx.density(g) for g, _ in level])
+    partial = np.mean([len(s) for _, s in level]) / n0
+    return np.array([1, size, density, math.log1p(len(level)) / 4, min(rnd, 60) / 60, min(runs, 2000) / n0 / 4,
+                     partial, size * density])
+
+
+def run_round_beam(G, choose, hooks, seed=0, small=5) -> tuple:
+    """One beam whose arm of ROUND_ARMS comes from choose(context) at the start of each round, never on an empty
+    level. Returns (RunResult, [(context, arm)] per round). `hooks` holds whichever of score, build, rank and value
+    the stack has; the first three go to the generator, and value ranks the level by partial size plus its value.
+    The running count of solves in the context is the solves made so far, with the small branches kept for the next
+    round counted already, so the last context's count is the run's quantum_runs."""
+    gen = gls_generator(seed=seed, **{h: hooks[h] for h in ("score", "build", "rank") if h in hooks})
+    value, n0 = hooks.get("value"), len(G)
+    state = dict(arm=0, runs=int(0 < n0 <= small), rnd=0, seen=[])
+
+    def start(level):
+        x = round_context(level, n0, state["runs"], state["rnd"])
+        state["arm"] = choose(x)
+        state["seen"].append((x, state["arm"]))
+
+    def generate(g, _):
+        maps = gen(g, ROUND_ARMS[state["arm"]][0])
+        state["runs"] += len(maps)
+        return maps
+
+    def solve(piece, m, _):
+        return exact_piece_solver(piece, m, ROUND_ARMS[state["arm"]][1])
+
+    def prune(level, _):
+        state["rnd"] += 1
+        beam = ROUND_ARMS[state["arm"]][2]
+        if len(level) > beam:
+            keys = [len(s) for _, s in level]
+            if value is not None:
+                keys = [k + v for k, v in zip(keys, value([g for g, _ in level]), strict=True)]
+            level = [level[i] for i in sorted(range(len(level)), key=keys.__getitem__, reverse=True)[:beam]]
+        state["runs"] += sum(0 < len(g) <= small for g, _ in level)
+        if level:
+            start(level)
+        return level
+    start([(G, [])])
+    return run_beam(G, generate, solve, 4, 2, prune, small), state["seen"]
+
+
+@functools.lru_cache(maxsize=None)
+def _round_hooks(stack, models_dir):
+    return method_hooks(stack, models_dir)     # loaded once per worker
+
+
+def round_episode(job: tuple) -> dict:
+    """job = (theta, eps, family, params, n, seed, rseed, cost, models_dir). One epsilon-greedy beam on a training
+    instance. Returns the reward size - cost * runs, size, runs, [(context, arm)] and v0, the stack's predicted value
+    of the root graph. Numpy only, so it crosses a process boundary."""
+    theta, eps, family, params, n, seed, rseed, cost, models_dir = job
+    if seed not in TRAIN_SEEDS:
+        raise ValueError(f"seed {seed} is not a training seed; episodes must not use it")
+    hooks, rng, G = _round_hooks(ROUND_STACK, models_dir), np.random.default_rng(rseed), make(family, n, seed, **params)
+
+    def choose(x):
+        return int(rng.integers(len(ROUND_ARMS))) if rng.random() < eps else int((theta @ x).argmax())
+    res, seen = run_round_beam(G, choose, hooks)
+    return dict(reward=res.size - cost * res.quantum_runs, size=res.size, runs=res.quantum_runs, seen=seen,
+                v0=float(hooks["value"]([G])[0]))
+
+
+def update_round(A, b, episodes) -> None:
+    """In place, per arm: A += x x^T and b += (reward - v0) x for every (x, arm) of every episode."""
+    for e in episodes:
+        for x, arm in e["seen"]:
+            A[arm] += np.outer(x, x)
+            b[arm] += (e["reward"] - e["v0"]) * x
+
+
 def round_runner(models_dir):
-    raise NotImplementedError("bandit-r is not written yet")
+    """run(graph, k, s, l, seed) for bandit-r. The stack's hooks are loaded here, so a missing file fails now. The arm
+    each round is greedy on `{models_dir}/bandit-r/theta_{l}.json`, read when first needed (c = l / 1000). A larger l
+    holds arm l - FIXED_ARM_L - 1 in every round and reads no theta. k and s are ignored."""
+    d = Path(models_dir or "models")
+    hooks, thetas = method_hooks(ROUND_STACK, d), {}
+
+    def run(G, k, s, l, seed):
+        if l > FIXED_ARM_L:
+            arm = l - FIXED_ARM_L - 1
+            choose = lambda x: arm
+        else:
+            if l not in thetas:
+                thetas[l] = np.array(json.loads((d / "bandit-r" / f"theta_{l}.json").read_text())["theta"])
+            choose = lambda x: int((thetas[l] @ x).argmax())
+        return run_round_beam(G, choose, hooks, seed)[0]
+    return run
 
 
 def _fit(a) -> None:
@@ -133,12 +242,53 @@ def _fit(a) -> None:
     print(f"wrote {a.out}")
 
 
+def _round(a) -> None:
+    from .az import _cpu_s
+    from .builder import _close, _map, _open_pool
+    out, arms = Path(a.out), range(len(ROUND_ARMS))
+    out.mkdir(parents=True, exist_ok=True)
+    instances = [(f, p, n, s) for f, p in TRAIN_SETTINGS for n in TRAIN_SIZES for s in TRAIN_SEEDS]
+    A, b = np.array([np.eye(ROUND_D) for _ in arms]), np.zeros((len(ROUND_ARMS), ROUND_D))
+    solve = lambda: np.array([np.linalg.solve(A[j], b[j]) for j in arms])
+    cpu0, pool = _cpu_s(), _open_pool(a.workers)
+    for t in range(1, a.iters + 1):
+        step, eps, base = time.perf_counter(), max(0.1, 1 - t / (0.7 * a.iters)), a.seed * 100003 + t
+        batch = random.Random(base).sample(instances, a.instances)
+        theta = solve()
+        results = _map(pool, round_episode, [(theta, eps, f, p, n, s, base * 1000 + i, a.cost, a.models)
+                                             for i, (f, p, n, s) in enumerate(batch)])
+        update_round(A, b, results)
+        row = dict(t=t, eps=eps, size=float(np.mean([r["size"] for r in results])),
+                   runs=float(np.mean([r["runs"] for r in results])),
+                   reward=float(np.mean([r["reward"] for r in results])), seconds=time.perf_counter() - step)
+        with open(out / "log.jsonl", "a") as f:
+            f.write(json.dumps(row) + "\n")
+        print(f"it {t}: eps {eps:.2f} size {row['size']:.2f} runs {row['runs']:.1f} reward {row['reward']:.3f} "
+              f"{row['seconds']:.1f} s", flush=True)
+    _close(pool)     # so the CPU total includes the workers
+    l, cpu = round(1000 * a.cost), _cpu_s() - cpu0
+    path = out / f"theta_{l}.json"
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(dict(theta=solve().tolist(), cost=a.cost, commit=dataset._commit(), cpu_s=cpu)))
+    os.replace(tmp, path)
+    print(f"wrote {path}, cpu {cpu:.0f} s", flush=True)
+
+
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser()
-    fit = ap.add_subparsers(dest="command", required=True).add_parser("fit")
+    commands = ap.add_subparsers(dest="command", required=True)
+    fit, rnd = commands.add_parser("fit"), commands.add_parser("round")
     fit.add_argument("--records", nargs="+", required=True, help="bench record files or globs, training seeds only")
     fit.add_argument("--out", required=True)
-    _fit(ap.parse_args(argv))
+    rnd.add_argument("--cost", type=float, required=True, help="cost per quantum run; the model is theta_{1000 * cost}")
+    rnd.add_argument("--iters", type=int, default=100)
+    rnd.add_argument("--instances", type=int, default=96)
+    rnd.add_argument("--seed", type=int, default=0)
+    rnd.add_argument("--models", default="models")
+    rnd.add_argument("--out", required=True)
+    rnd.add_argument("--workers", type=int, default=2)
+    a = ap.parse_args(argv)
+    (_fit if a.command == "fit" else _round)(a)
 
 
 if __name__ == "__main__":

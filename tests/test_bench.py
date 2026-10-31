@@ -195,5 +195,5 @@ def test_a_bandit_name_routes_to_its_runner(tmp_path, monkeypatch):
     from learned_selection.bench import method_runner
     monkeypatch.setattr(bandit, "instance_runner", lambda d: ("instance", d))
     assert method_runner("bandit-i", tmp_path) == ("instance", tmp_path)
-    with pytest.raises(NotImplementedError):
-        method_runner("bandit-r", tmp_path)
+    monkeypatch.setattr(bandit, "round_runner", lambda d: ("round", d))
+    assert method_runner("bandit-r", tmp_path) == ("round", tmp_path)
