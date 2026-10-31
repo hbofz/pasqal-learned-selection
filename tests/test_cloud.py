@@ -1,6 +1,7 @@
-import json, threading, time
-import networkx as nx, pytest
-from learned_selection.cloud import CloudPieceSolver, CountsCache, uniform_piece_solver
+import json, socket, threading, time
+import networkx as nx, pytest, requests
+from requests.adapters import HTTPAdapter
+from learned_selection.cloud import HTTP_TIMEOUT_S, CloudPieceSolver, CountsCache, bound_http_calls, uniform_piece_solver
 from learned_selection.solvers import is_independent
 from pulser.exceptions.sequence import MinQubitNumberError
 from learned_selection.cloud import EMULATION_DEVICE, decode, load_device, calibrated_layout, trap_map, piece_sequence, summarize_counts
@@ -261,3 +262,63 @@ def test_log_keeps_entries_without_a_cache():
     s(PIECE, MAP, 2)
     e = s.log[-1]
     assert e["n_atoms"] == 12 and e["batch_id"] == "b1" and e["shots"] == 500 and len(e["key"]) == 64 and "top_sizes" in e
+
+
+# --- every HTTP call is bounded (pasqal_cloud sets no timeout on the result download or the token query) ---
+
+@pytest.fixture
+def original_send(monkeypatch):
+    seen = []
+    monkeypatch.setattr(HTTPAdapter, "send", lambda self, request, **kw: seen.append(kw.get("timeout")))     # undone after the test
+    return seen
+
+
+def test_http_calls_without_a_timeout_get_the_default(original_send):
+    bound_http_calls()
+    adapter = HTTPAdapter()
+    adapter.send(None, timeout=None)
+    adapter.send(None)
+    adapter.send(None, timeout=7)
+    adapter.send(None, timeout=(3, 9))
+    assert original_send == [HTTP_TIMEOUT_S, HTTP_TIMEOUT_S, 7, (3, 9)] and HTTP_TIMEOUT_S == 120
+
+
+def test_bounding_twice_does_not_stack(original_send):
+    bound_http_calls()
+    once = HTTPAdapter.send
+    bound_http_calls(5)
+    assert HTTPAdapter.send is once
+    HTTPAdapter().send(None)
+    assert original_send == [HTTP_TIMEOUT_S]
+
+
+def test_silent_server_times_out_under_the_bound(monkeypatch):
+    monkeypatch.setattr(HTTPAdapter, "send", getattr(HTTPAdapter.send, "__wrapped__", HTTPAdapter.send))    # real send, rewrapped here only
+    bound_http_calls(0.3)
+    with socket.socket() as srv:
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        t0 = time.monotonic()
+        with pytest.raises(requests.Timeout):
+            requests.get(f"http://127.0.0.1:{srv.getsockname()[1]}/")
+        assert time.monotonic() - t0 < 2
+
+
+def test_a_timeout_in_the_result_fetch_fails_the_attempt_and_is_retried(nosleep):
+    class SlowJob:
+        calls = 0
+        @property
+        def result(self):
+            SlowJob.calls += 1
+            if SlowJob.calls == 1:
+                raise requests.ReadTimeout("result download")
+            return ODD([str(v) for v in PIECE])
+    fake = FakeClient()
+    create = fake.create_batch
+    def first_slow(*a, **kw):
+        b = create(*a, **kw)
+        if fake.calls == 1:
+            b.ordered_jobs = [SlowJob()]
+        return b
+    fake.create_batch = first_slow
+    assert make(fake, retries=1)(PIECE, MAP, 1) == [ODDS] and fake.calls == 2

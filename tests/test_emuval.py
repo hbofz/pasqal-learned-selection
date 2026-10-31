@@ -122,6 +122,20 @@ def test_replay_matches_and_finds_a_miss(tmp_path, models, capsys):
     assert differ >= 1 and same + differ == 4 and "DIFFER" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("field", emuval.REPLAY_FIELDS)
+def test_replay_compares_every_field(tmp_path, models, capsys, field):
+    out, solver = tmp_path / "o.jsonl", cloud(tmp_path)
+    assert run_grid(todo(), lambda j: solver, "emu-mps", out, 2, models, tmp_path / "calls.jsonl") == 0
+    cache, rows = tmp_path / "c.jsonl", lines(out)
+    assert replay(out, cache, 1, models) == (4, 0)
+    rows[0][field] = [rows[0][field], "changed"] if isinstance(rows[0][field], (list, bool)) else rows[0][field] + 1
+    out.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    assert replay(out, cache, 1, models) == (3, 1)
+    assert f"DIFFER" in capsys.readouterr().out
+    argv = ["--solver", "cloud", "--out", str(out), "--cache", str(cache), "--models", str(models), "--replay", "1"]
+    assert main(argv) == 1 and "1 differ" in capsys.readouterr().out
+
+
 def test_calls_log_line(tmp_path, models):
     out, calls, solver = tmp_path / "o.jsonl", tmp_path / "calls.jsonl", cloud(tmp_path)
     assert run_grid(todo(), lambda j: solver, "emu-mps", out, 2, models, calls) == 0

@@ -102,6 +102,9 @@ def run_grid(todo, solve_for, label, out, workers, models="models", calls=None) 
         pool.shutdown(cancel_futures=True)         # an interrupt leaves the queued jobs unstarted
 
 
+REPLAY_FIELDS = ("size", "quantum_runs", "pasqal_runs", "atoms", "rounds", "max_atoms", "atoms_all", "over_30")
+
+
 def replay(out, cache_path, stride, models="models") -> tuple[int, int]:
     """Rerun every stride-th record of out from the cache alone. Returns (same, differ)."""
     solve = CloudPieceSolver(None, virtual_device(), cache=CountsCache(cache_path))
@@ -115,11 +118,10 @@ def replay(out, cache_path, stride, models="models") -> tuple[int, int]:
             print(f"DIFFER {job}: no cached answer {e}", flush=True)
             differ += 1
             continue
-        fields = ("size", "quantum_runs", "pasqal_runs", "atoms")
-        if all(new[f] == r[f] for f in fields):
+        if all(new[f] == r[f] for f in REPLAY_FIELDS):
             same += 1
         else:
-            print(f"DIFFER {job}: {[(f, r[f], new[f]) for f in fields if new[f] != r[f]]}", flush=True)
+            print(f"DIFFER {job}: {[(f, r[f], new[f]) for f in REPLAY_FIELDS if new[f] != r[f]]}", flush=True)
             differ += 1
     return same, differ
 

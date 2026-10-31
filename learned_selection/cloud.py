@@ -20,6 +20,7 @@ from importlib import resources
 from pathlib import Path
 
 import networkx as nx
+import requests.adapters
 from pasqal_cloud.device import EmulatorType
 from pasqal_cloud.device.device_types import DeviceTypeName
 from pasqal_cloud.utils.polling import NON_TERMINAL_STATUSES
@@ -34,6 +35,7 @@ from .solvers import is_independent, repair
 PROJECT_ID = "6c44ee19-cbf0-4355-934f-4825f40cca40"
 EMULATION_DEVICE = AnalogDevice
 DURATION_NS = 4000
+HTTP_TIMEOUT_S = 120
 OMEGA = [1e-9, 4.850055051963065, 12.566370614359172, 11.882582923954192, 1e-9]           # Pasqal's schedule
 DELTA = [-125.66370614359172, -23.735663070454464, 2.429518510655143, 13.330733571729787, 31.06390344878028]
 
@@ -43,12 +45,28 @@ def virtual_device(max_atoms: int = 61) -> VirtualDevice:
     return dataclasses.replace(AnalogDevice.to_virtual(), max_atom_num=max_atoms, max_layout_filling=1.0)
 
 
+def bound_http_calls(timeout: float = HTTP_TIMEOUT_S) -> None:
+    """Give every HTTP call that sets no timeout one (pasqal_cloud sets none on the result download and the token query).
+    Wraps HTTPAdapter.send once; later calls change nothing."""
+    send = requests.adapters.HTTPAdapter.send
+    if getattr(send, "_bounded", False):
+        return
+
+    def bounded(self, request, *a, **kw):
+        if kw.get("timeout") is None and len(a) < 2:        # send(request, stream, timeout, ...): a positional timeout stays
+            kw["timeout"] = timeout
+        return send(self, request, *a, **kw)
+    bounded._bounded, bounded.__wrapped__ = True, send
+    requests.adapters.HTTPAdapter.send = bounded
+
+
 def client():
     from pasqal_cloud.pasqal_cloud_client import PasqalCloudClient
+    bound_http_calls()
 
     def kc(*a):
         return subprocess.run(["security", "find-generic-password", "-s", "pasqal-cloud", *a],
-                              capture_output=True, text=True, check=True).stdout
+                              capture_output=True, text=True, check=True, timeout=30).stdout
     account = re.search(r'"acct"<blob>="([^"]+)"', kc()).group(1)
     return PasqalCloudClient(username=account, password=kc("-w").strip(), project_id=PROJECT_ID)
 
