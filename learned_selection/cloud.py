@@ -13,7 +13,7 @@ limits are also lower (max_amp 11.31, max_abs_detuning 62.83 rad/us), so piece_s
 
 Job results are bitstring -> count dicts, bit i belonging to the register's i-th qubit in insertion order, never by sorted qubit ids.
 """
-import dataclasses, hashlib, json, random, re, subprocess, sys, threading, time, zlib
+import dataclasses, hashlib, json, os, random, re, stat, subprocess, sys, threading, time, zlib
 from collections import Counter
 from functools import cache
 from importlib import resources
@@ -60,15 +60,34 @@ def bound_http_calls(timeout: float = HTTP_TIMEOUT_S) -> None:
     requests.adapters.HTTPAdapter.send = bounded
 
 
+def _login() -> tuple[str, str]:
+    """(username, password): the macOS Keychain on a Mac, else a private file, PASQAL_LOGIN_FILE or ~/.config/pasqal/login
+    (line 1 the username, line 2 the password). Errors name the path, never the contents."""
+    if sys.platform == "darwin":
+        def kc(*a):
+            return subprocess.run(["security", "find-generic-password", "-s", "pasqal-cloud", *a],
+                                  capture_output=True, text=True, check=True, timeout=30).stdout
+        return re.search(r'"acct"<blob>="([^"]+)"', kc()).group(1), kc("-w").strip()
+    path = Path(os.environ.get("PASQAL_LOGIN_FILE") or Path.home() / ".config" / "pasqal" / "login")
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+        if mode & 0o077:
+            raise RuntimeError(f"{path}: mode {mode:03o} lets group or others in, chmod 600 it")
+        lines = [l.removesuffix("\r") for l in path.read_text().removesuffix("\n").split("\n")]
+    except OSError as e:
+        raise RuntimeError(f"{path}: cannot read the login file ({type(e).__name__})") from None
+    except UnicodeDecodeError:
+        raise RuntimeError(f"{path}: the login file is not text") from None
+    if len(lines) != 2 or not all(lines):
+        raise RuntimeError(f"{path}: the login file needs exactly two non-empty lines, username then password")
+    return lines[0], lines[1]
+
+
 def client():
     from pasqal_cloud.pasqal_cloud_client import PasqalCloudClient
     bound_http_calls()
-
-    def kc(*a):
-        return subprocess.run(["security", "find-generic-password", "-s", "pasqal-cloud", *a],
-                              capture_output=True, text=True, check=True, timeout=30).stdout
-    account = re.search(r'"acct"<blob>="([^"]+)"', kc()).group(1)
-    return PasqalCloudClient(username=account, password=kc("-w").strip(), project_id=PROJECT_ID)
+    username, password = _login()
+    return PasqalCloudClient(username=username, password=password, project_id=PROJECT_ID)
 
 
 @cache

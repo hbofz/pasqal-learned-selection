@@ -1,7 +1,9 @@
 import json, socket, threading, time
+from types import SimpleNamespace
 import networkx as nx, pytest, requests
 from requests.adapters import HTTPAdapter
-from learned_selection.cloud import HTTP_TIMEOUT_S, CloudPieceSolver, CountsCache, bound_http_calls, uniform_piece_solver
+from learned_selection import cloud
+from learned_selection.cloud import HTTP_TIMEOUT_S, CloudPieceSolver, CountsCache, _login, bound_http_calls, uniform_piece_solver
 from learned_selection.solvers import is_independent
 from pulser.exceptions.sequence import MinQubitNumberError
 from learned_selection.cloud import EMULATION_DEVICE, decode, load_device, calibrated_layout, trap_map, piece_sequence, summarize_counts
@@ -322,3 +324,60 @@ def test_a_timeout_in_the_result_fetch_fails_the_attempt_and_is_retried(nosleep)
         return b
     fake.create_batch = first_slow
     assert make(fake, retries=1)(PIECE, MAP, 1) == [ODDS] and fake.calls == 2
+
+
+# --- the login: Keychain on macOS, a private file elsewhere (never the real file, never the real client) ---
+
+SECRET = "p@ss w0rd; $&' x "
+
+
+@pytest.fixture
+def linux_login(monkeypatch, tmp_path):
+    monkeypatch.setattr("sys.platform", "linux")
+    path = tmp_path / "login"
+    monkeypatch.setenv("PASQAL_LOGIN_FILE", str(path))
+    return path
+
+
+def test_login_reads_the_file_on_linux(linux_login):
+    linux_login.write_text(f"alice\n{SECRET}\n")
+    linux_login.chmod(0o600)
+    assert _login() == ("alice", SECRET)
+    linux_login.write_bytes(f"alice\r\n{SECRET}".encode())       # CRLF, no final newline
+    assert _login() == ("alice", SECRET)
+
+
+def test_login_refuses_an_open_file(linux_login):
+    linux_login.write_text(f"alice\n{SECRET}\n")
+    for mode in (0o644, 0o640, 0o602):
+        linux_login.chmod(mode)
+        with pytest.raises(RuntimeError) as e:
+            _login()
+        assert str(linux_login) in str(e.value) and SECRET not in str(e.value) and "alice" not in str(e.value)
+
+
+@pytest.mark.parametrize("text", [None, f"{SECRET}\n", f"alice\n{SECRET}\nextra\n", f"alice\n\n", f"\n{SECRET}\n", ""],
+                         ids=["missing", "one line", "three lines", "empty password", "empty username", "empty file"])
+def test_login_refuses_missing_and_malformed(linux_login, text):
+    if text is not None:
+        linux_login.write_text(text)
+        linux_login.chmod(0o600)
+    with pytest.raises(RuntimeError) as e:
+        _login()
+    assert str(linux_login) in str(e.value) and SECRET.strip() not in str(e.value) and "alice" not in str(e.value) and "extra" not in str(e.value)
+
+
+def test_login_uses_the_keychain_on_macos(monkeypatch, tmp_path):
+    f = tmp_path / "login"
+    f.write_text("fileuser\nfilepass\n")
+    f.chmod(0o600)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setenv("PASQAL_LOGIN_FILE", str(f))
+    monkeypatch.setattr(type(f), "read_text", lambda self, *a, **k: pytest.fail("read the file"))
+    calls = []
+    def run(cmd, **kw):
+        calls.append((cmd, kw))
+        return SimpleNamespace(stdout="pw\n" if "-w" in cmd else '    "acct"<blob>="alice"\n')
+    monkeypatch.setattr(cloud.subprocess, "run", run)
+    assert _login() == ("alice", "pw")
+    assert len(calls) == 2 and all(kw["timeout"] == 30 and c[0] == "security" for c, kw in calls)
