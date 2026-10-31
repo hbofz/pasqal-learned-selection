@@ -305,3 +305,64 @@ def test_bandit_r_record_through_bench(tmp_path, monkeypatch, stack, builder):
     assert KEYS <= rec.keys() and (rec["method"], rec["track"], rec["k"], rec["s"], rec["l"]) == (
         "bandit-r", "structure", 4, 2, 10)
     assert rec["quantum_runs"] > 0 and not rec["exploded"]
+
+
+# what the round bandit learns from
+
+def test_round_context_by_hand():
+    level = [(nx.path_graph(4), [0, 1]), (nx.complete_graph(6), [0, 1, 2, 3])]      # sizes 4, 6; densities 1/2, 1
+    x = round_context(level, 20, 7, 3)
+    assert np.allclose(x, [1, 5 / 20, 0.75, np.log1p(2) / 4, 3 / 60, 7 / 20 / 4, 3 / 20, 5 / 20 * 0.75])
+    capped = round_context(level, 20, 5000, 100)
+    assert capped[4] == 1 and capped[5] == pytest.approx(2000 / 20 / 4)
+
+
+def test_update_round_credits_every_round_of_an_episode():
+    x1, x2, x3 = np.arange(1.0, 9), np.arange(8.0, 0, -1), np.linspace(-1, 1, 8)
+    A, b = np.array([np.eye(8)] * 4), np.zeros((4, 8))
+    update_round(A, b, [dict(seen=[(x1, 0), (x2, 3), (x3, 0)], reward=5.0, v0=2.0)])
+    assert np.allclose(b[0], 3 * (x1 + x3)) and np.allclose(b[3], 3 * x2) and not b[1:3].any()
+    assert np.allclose(A[0], np.eye(8) + np.outer(x1, x1) + np.outer(x3, x3))
+    assert np.allclose(A[3], np.eye(8) + np.outer(x2, x2)) and np.allclose(A[1:3], np.eye(8))
+
+
+def test_run_round_beam_matches_a_hand_written_beam_with_a_value_hook():
+    G = erdos_renyi(100, 0.1, 1)
+    value = lambda graphs: [4.0 * (g.number_of_edges() % 3) - len(g) / 2 for g in graphs]     # not a function of size
+    (k, s, beam), gen = ROUND_ARMS[3], gls_generator(seed=0)
+
+    def prune(level, _):
+        if len(level) <= beam:
+            return level
+        keys = [len(sol) + v for (_, sol), v in zip(level, value([g for g, _ in level]))]
+        return [level[i] for i in sorted(range(len(level)), key=keys.__getitem__, reverse=True)[:beam]]
+    direct = run_beam(G, lambda g, _: gen(g, k), lambda piece, m, _: exact_piece_solver(piece, m, s), 4, 2, prune)
+    r, _ = run_round_beam(G, lambda x: 3, dict(value=value))
+    for key in ("size", "quantum_runs", "pasqal_runs", "atoms", "rounds", "run_sizes"):
+        assert getattr(r, key) == getattr(direct, key), key
+    assert r.rounds > 1 and max(r.run_sizes) > 5
+
+
+def test_round_training_names_its_log_and_model_by_cost(tmp_path, monkeypatch):
+    monkeypatch.setattr(bandit, "ROUND_STACK", ROUND_TOY)
+    out = tmp_path / "out"
+    for cost in ("0.003", "0.01"):
+        bandit.main(["round", "--cost", cost, "--iters", "1", "--instances", "2", "--seed", "4",
+                     "--models", str(_round_models(tmp_path)), "--out", str(out), "--workers", "1"])
+    assert sorted(p.name for p in out.iterdir()) == ["log_10.jsonl", "log_3.jsonl", "theta_10.json", "theta_3.json"]
+    meta = json.loads((out / "theta_10.json").read_text())
+    assert (meta["iters"], meta["seed"], meta["instances"], meta["cost"]) == (1, 4, 2, 0.01)
+    assert json.loads((out / "log_3.jsonl").read_text())["t"] == 1
+
+
+def test_greedy_takes_the_arm_of_largest_theta_x(tmp_path, monkeypatch):
+    monkeypatch.setattr(bandit, "ROUND_STACK", ROUND_TOY)
+    d, asked = _round_models(tmp_path), _spy_asked(monkeypatch)
+    theta = np.zeros((4, 8))
+    theta[:, 0] = [0.1, 0.2, 0.9, 0.3]          # x[0] is 1, so arm 2 is largest and arm 0 smallest
+    (d / "bandit-r").mkdir()
+    (d / "bandit-r" / "theta_10.json").write_text(json.dumps(dict(theta=theta.tolist())))
+    round_runner(d)(erdos_renyi(40, 0.2, 0), 4, 2, 10, 0)
+    assert asked and set(asked) == {ROUND_ARMS[2][0]}
+    out = round_episode((theta, 0.0, "er", {"p": 0.25}, 40, 3, 7, 0.01, d))
+    assert out["seen"] and {arm for _, arm in out["seen"]} == {2}

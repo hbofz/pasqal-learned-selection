@@ -26,6 +26,69 @@ def test_parent_count_on_a_path_and_a_triangle():
     assert parent_count({0: 32}, adj, 32) == 1                        # at least 1
 
 
+def _by_networkx(place, L, start_trap):
+    """Placed traps, not the start, whose removal leaves the rest connected on the lattice graph."""
+    occ = set(place.values())
+    return max(sum(nx.is_connected(L.subgraph(occ - {t})) for t in occ - {start_trap}), 1)
+
+
+def test_parent_count_matches_removal_and_connectivity_on_built_pieces():
+    adj, start_trap, _ = _lattice()
+    L, net = lattice_graph(load_coords()), _net()
+    for seed, G in enumerate((erdos_renyi(30, 0.2, 3), erdos_renyi(40, 0.1, 4), erdos_renyi(25, 0.3, 5))):
+        order = list(_sampled(G, net, seed, seed)[0].items())
+        for i in range(1, len(order) + 1):
+            assert parent_count(dict(order[:i]), adj, start_trap) == _by_networkx(dict(order[:i]), L, start_trap)
+    far = next(t for t in range(len(adj)) if t not in (32, 23, 14) and not any(t in adj[o] for o in (32, 23, 14)))
+    apart = {0: 32, 1: 23, 2: 14, 3: far}      # the last one is not on the lattice next to the rest
+    assert not nx.is_connected(L.subgraph(apart.values()))
+    assert parent_count(apart, adj, 32) == _by_networkx(apart, L, 32) == 1      # only the stray one can go
+
+
+def _hand_logp(net, G, decisions):
+    """The path's log probability from the pair network's logits and an independent log softmax."""
+    H, (w1, b1, w2, b2) = net.embed(encode(G).to("cpu")).detach().numpy(), pair_weights(net)
+    total = 0.0
+    for idx, phi, chosen in decisions:
+        logit = (np.maximum(np.c_[H[idx], phi] @ w1.T + b1, 0) @ w2.T + b2).ravel().astype(np.float64)
+        total += logit[chosen] - (logit.max() + np.log(np.exp(logit - logit.max()).sum()))
+    return total
+
+
+def test_path_logp_is_the_sum_of_log_softmaxes():
+    G, net, rec = erdos_renyi(30, 0.2, 3), _net(), _rec(30, 0.2, 3)
+    paths = [_sampled(G, net, v, 2 * v)[1] for v in (0, 1, 2)]
+    rows = [(0, 0.0, 0.0, d, 0.0, 9) for d in paths]
+    got = path_logp(net, rec["n"], rec["edges"], rows)
+    for lp, d in zip(got, paths):
+        assert float(lp) == pytest.approx(_hand_logp(net, G, d), abs=1e-4) and float(lp) < 0
+
+
+def test_rollout_log_pb_follows_the_insertion_order(tmp_path):
+    import math, random
+    from learned_selection.graphdata import graph_of
+    _models(tmp_path)
+    rec, net = _rec(30, 0.15, 2), _net()
+    n, edges, rows = tb_rollout((builder.blob_of(net), rec["n"], rec["edges"], 2, 3, 7, 2.0, "gin-h5", str(tmp_path)))
+    g, (adj, start_trap, trap_x) = graph_of(dict(n=n, edges=edges)), _lattice()
+    H, weights, rng, want = net.embed(encode(g).to("cpu")).detach().numpy(), pair_weights(net), np.random.default_rng(7), []
+    for v in random.Random(7).sample(list(g), 2):
+        for _ in range(3):
+            piece, decisions = build_piece(g, H, weights, v, adj, start_trap, trap_x, rng)
+            order = list(piece.items())
+            want.append(-sum(math.log(parent_count(dict(order[:i]), adj, start_trap)) for i in range(2, len(order) + 1)))
+    assert len(rows) == 6 and [r[2] for r in rows] == pytest.approx(want) and min(want) < 0
+
+
+def test_loss_penalises_the_backward_term_with_the_right_sign():
+    G, net, rec = erdos_renyi(30, 0.2, 3), _net(), _rec(30, 0.2, 3)
+    a, b = _sampled(G, net, 0, 1)[1], _sampled(G, net, 0, 2)[1]
+    la, lb = (float(x) for x in path_logp(net, rec["n"], rec["edges"], [(0, 0, 0, a, 0, 9), (0, 0, 0, b, 0, 9)]))
+    rows = [(0, 0.5, -1.0, a, 0.0, 9), (0, 0.5, -4.0, b, 0.0, 9)]       # same flow but for the backward term
+    loss, _ = tb_loss(net, rec["n"], rec["edges"], rows)
+    assert float(loss) == pytest.approx(((la - lb) - (-1.0 - -4.0)) ** 2 / 2, abs=1e-4)
+
+
 def test_state_seed_follows_the_label_set_and_not_the_order():
     G = erdos_renyi(30, 0.2, 1)
     H = nx.Graph(); H.add_nodes_from(reversed(list(G))); H.add_edges_from(G.edges)

@@ -36,7 +36,6 @@ COSTS = (0.001, 0.003, 0.01, 0.03)
 LOGGED = (0, 1, 3, 5, 6)     # n, edges, caro_wei, deg_max, deg_mean among graph_features
 ROUND_STACK = "bld-h3+pg-h4+dgin-h5"
 ROUND_ARMS = ((1, 1, 1), (2, 2, 2), (4, 2, 4), (8, 3, 8))     # (k, s, beam)
-ROUND_COSTS = (0.003, 0.01, 0.03)
 ROUND_D = 8
 FIXED_ARM_L = 9000     # l = FIXED_ARM_L + 1 + j runs arm j in every round, with no theta
 
@@ -261,7 +260,7 @@ def _round(a) -> None:
         row = dict(t=t, eps=eps, size=float(np.mean([r["size"] for r in results])),
                    runs=float(np.mean([r["runs"] for r in results])),
                    reward=float(np.mean([r["reward"] for r in results])), seconds=time.perf_counter() - step)
-        with open(out / "log.jsonl", "a") as f:
+        with open(out / f"log_{round(1000 * a.cost)}.jsonl", "a") as f:
             f.write(json.dumps(row) + "\n")
         print(f"it {t}: eps {eps:.2f} size {row['size']:.2f} runs {row['runs']:.1f} reward {row['reward']:.3f} "
               f"{row['seconds']:.1f} s", flush=True)
@@ -269,7 +268,8 @@ def _round(a) -> None:
     l, cpu = round(1000 * a.cost), _cpu_s() - cpu0
     path = out / f"theta_{l}.json"
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(dict(theta=solve().tolist(), cost=a.cost, commit=dataset._commit(), cpu_s=cpu)))
+    tmp.write_text(json.dumps(dict(theta=solve().tolist(), cost=a.cost, iters=a.iters, seed=a.seed,
+                                   instances=a.instances, commit=dataset._commit(), cpu_s=cpu)))
     os.replace(tmp, path)
     print(f"wrote {path}, cpu {cpu:.0f} s", flush=True)
 
