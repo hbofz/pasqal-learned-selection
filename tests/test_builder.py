@@ -342,3 +342,28 @@ def test_training_refuses_every_seed_outside_training(tmp_path):
     save_builder(_net(), tmp_path / "init.pt")
     with pytest.raises(ValueError):
         main(["rl", "--init", str(tmp_path / "init.pt"), "--models", str(tmp_path), "--train", path, "--out", str(tmp_path / "o")])
+
+
+def test_rl_resume_refuses_changed_settings_but_takes_more_iterations(tmp_path):
+    import json
+    _models(tmp_path)
+    _write_states(tmp_path / "s.pkl", [_rec(24, 0.15, s) for s in range(4)])
+    save_builder(_net(), tmp_path / "init.pt")
+    out = tmp_path / "o"
+    main(_rl_args(tmp_path, out, 2, tmp_path / "init.pt"))
+    for flag, name, value in (("--lr", "lr", "0.5"), ("--seed", "seed", "4"), ("--samples", "samples", "3")):
+        with pytest.raises(ValueError, match=f"changed {name}"):
+            main(_rl_args(tmp_path, out, 4, tmp_path / "init.pt") + [flag, value])
+    main(_rl_args(tmp_path, out, 4, tmp_path / "init.pt"))
+    assert [json.loads(l)["iter"] for l in (out / "log.jsonl").read_text().splitlines()] == [1, 2, 3, 4]
+
+
+def test_a_dead_worker_raises_instead_of_hanging():
+    import os
+    from concurrent.futures.process import BrokenProcessPool
+    pool = builder._open_pool(2)
+    try:
+        with pytest.raises(BrokenProcessPool):
+            builder._map(pool, os._exit, [1, 1])
+    finally:
+        builder._close(pool)

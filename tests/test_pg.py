@@ -1,4 +1,4 @@
-import json, resource
+import json, os, resource
 
 import networkx as nx, numpy as np, pytest, torch
 from learned_selection import pg
@@ -123,6 +123,12 @@ def test_pg_resume_matches_an_unbroken_run(tmp_path):
     assert [r["t"] for r in rows] == [1, 2, 3, 4]
     meta = json.loads((tmp_path / "split" / "train_meta_pg-h4.json").read_text())
     assert meta["c"] == 0.01 and meta["cpu_s"] > 0 and meta["wall_s"] > 0
+    for where in (tmp_path / "split", tmp_path / "split" / "it4", tmp_path / "split" / "it2"):   # beside every checkpoint
+        m = json.loads((where / "train_meta_pg-h4.json").read_text())
+        assert (m["lr"], m["stack"], m["init"], m["iters"]) == (1e-2, "dgin-h2+dgin-h5", str(models / "dgin-h4.pt"), 2 if where.name == "it2" else 4)
+        assert m["iter"] == (2 if where.name == "it2" else 4) and m["commit"]    # it2 was written by the run asked for 2
+    assert sorted(p.name for p in (tmp_path / "split").iterdir() if p.is_file()) == [
+        "log.jsonl", "state.pt", "train_meta_pg-h4.json"]                                         # no stray temp files
 
 
 def test_a_checkpoint_counts_the_cpu_of_the_workers(tmp_path, monkeypatch):
@@ -154,3 +160,27 @@ def test_rollouts_refuse_seeds_outside_training():
     for seed in (100, 105, 200, 1000):
         with pytest.raises(ValueError):
             rollout_job((b"", "dgin-h2+dgin-h5", "models", "er", {"p": 0.1}, 40, seed, 0, 0.01))
+
+
+def test_pg_resume_refuses_changed_settings_but_takes_more_iterations(tmp_path):
+    models = _toy_models(tmp_path / "models")
+    run = lambda iters, *extra: pg.main(["--init", str(models / "dgin-h4.pt"), "--models", str(models), "--iters", str(iters),
+                                         "--every", "1", "--instances", "1", "--rollouts", "1", "--workers", "1",
+                                         "--threads", "1", "--out", str(tmp_path / "o"), *extra])
+    run(1)
+    for flag, name, value in (("--c", "c", "0.02"), ("--lr", "lr", "0.5"), ("--seed", "seed", "1")):
+        with pytest.raises(ValueError, match=f"changed {name}"):
+            run(2, flag, value)
+    run(2, "--every", "2")
+    rows = [json.loads(line) for line in (tmp_path / "o" / "log.jsonl").read_text().splitlines()]
+    assert [r["t"] for r in rows] == [1, 2]
+
+
+def test_a_dead_worker_raises_instead_of_hanging():
+    from concurrent.futures.process import BrokenProcessPool
+    pool = pg._open_pool(2)
+    try:
+        with pytest.raises(BrokenProcessPool):
+            pg._map(pool, os._exit, [1, 1])
+    finally:
+        pg._close(pool)

@@ -15,6 +15,7 @@ on numpy copies of the weights and return plain arrays.
         --models models --train 'cache/graphs_train_*.pkl' --out cache/bld/rl --threads 2 --workers 8
 """
 import argparse, glob, io, json, multiprocessing, os, random, shutil, time
+from concurrent.futures import ProcessPoolExecutor
 from functools import cache
 from pathlib import Path
 
@@ -275,18 +276,26 @@ def _expert_job(job: tuple) -> tuple:
 
 
 def _open_pool(workers: int):
-    """A spawn pool of one-thread workers, or None for a single worker, which runs in this process."""
-    return multiprocessing.get_context("spawn").Pool(workers, torch.set_num_threads, (1,)) if workers > 1 else None
+    """A spawn pool of one-thread workers, or None for a single worker, which runs in this process. A worker that dies
+    raises BrokenProcessPool from the map instead of leaving it waiting."""
+    return (ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("spawn"),
+                                initializer=torch.set_num_threads, initargs=(1,)) if workers > 1 else None)
 
 
 def _map(pool, fn, jobs: list) -> list:
-    return pool.map(fn, jobs, chunksize=2) if pool else list(map(fn, jobs))
+    return list(pool.map(fn, jobs, chunksize=2)) if pool else list(map(fn, jobs))
 
 
 def _close(pool) -> None:
     if pool:
-        pool.close()
-        pool.join()     # children's CPU is counted only once they are waited for
+        pool.shutdown(wait=True)     # children's CPU is counted only once they are waited for
+
+
+def _refuse_changed(saved: dict, now: dict) -> None:
+    """A resume continues the run it saved, so a setting that differs from the saved one is an error."""
+    for name, old in saved.items():
+        if now[name] != old:
+            raise ValueError(f"resume with changed {name}: saved {old!r}, now {now[name]!r}")
 
 
 def _training_states(a) -> list[dict]:
@@ -380,8 +389,11 @@ def rl(a) -> None:
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     t, before = 0, 0.0
+    settings = dict(seed=a.seed, lr=a.lr, init=str(a.init), rank=a.rank, value=a.value, states=a.states, starts=a.starts,
+                    samples=a.samples, min_n=a.min_n, train=[str(p) for p in a.train], max_states=a.max_states)
     if (out / "state.pt").exists():
         saved = torch.load(out / "state.pt", weights_only=True)
+        _refuse_changed(saved.get("settings", {}), settings)
         model.load_state_dict(saved["model"])
         opt.load_state_dict(saved["opt"])
         t, before = saved["t"], saved["cpu_s"]
@@ -407,7 +419,8 @@ def rl(a) -> None:
             _copy_companions(a, out / f"it{t}")
             save_builder(model, out / f"it{t}" / "bld-h3.pt")
             _write_meta(meta, out / f"it{t}" / "train_meta_bld-h3.json")
-        _atomic_save(dict(model=model.state_dict(), opt=opt.state_dict(), t=t, cpu_s=spent), out / "state.pt")
+        _atomic_save(dict(model=model.state_dict(), opt=opt.state_dict(), t=t, cpu_s=spent, settings=settings),
+                     out / "state.pt")
         _write_meta(meta, out / "train_meta_bld-h3.json")
     print(f"rl: {t} iterations, cpu {before + _cpu_s() - cpu:.0f} s", flush=True)
 

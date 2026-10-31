@@ -234,3 +234,53 @@ def test_paired_gain_reads_the_baseline_at_its_own_config():
     assert paired_gain(ours + theirs, "m", "gls", config=(2, 2, 5, 1), reps=50) == []
     (h,) = paired_gain(ours + theirs, "m", "gls", config=(2, 2, 5, 1), base_config=(4, 2, 10, 1), reps=50)
     assert h["run_ratio"] == pytest.approx(0.5) and h["d_gap"] == pytest.approx(0.0)
+
+
+def _varied(shift, zero_cell=False):
+    """Two cells of 20 varied instances: the method makes about 0.7 of the baseline's runs and its gap differs by
+    `shift` plus noise. With `zero_cell`, the method made no runs in every instance of the second cell."""
+    import random
+    cells, rows = [(FA, PA, TEST_SIZES[0]), (FB, PB, TEST_SIZES[0])], []
+    for c, cell in enumerate(cells):
+        rng = random.Random(c)
+        base = [(rng.uniform(60, 140), rng.uniform(3, 8)) for _ in TEST_SEEDS]
+        method = [(0 if zero_cell and c else b[0] * 0.7 * rng.uniform(0.7, 1.3), b[1] + shift + rng.gauss(0, 0.4)) for b in base]
+        rows += _pair_rows(cell, TEST_SEEDS, method, base)
+    return rows
+
+
+def _by_hand(rows):
+    """Run ratio, mean gap difference and the count of instances without runs, from a plain loop over the cells."""
+    import math
+    cells, no_runs = {}, 0
+    for r in rows:
+        cells.setdefault((r["family"], str(r["params"])), {}).setdefault(r["seed"], {})[r["method"]] = r
+    logs, diffs = [], []
+    for cell in cells.values():
+        pairs = list(cell.values())
+        good = [math.log(p["m"]["quantum_runs"] / p["gls"]["quantum_runs"]) for p in pairs if p["m"]["quantum_runs"] > 0]
+        no_runs += len(pairs) - len(good)
+        if good:
+            logs.append(sum(good) / len(good))
+        diffs.append(sum(p["m"]["gap_pct"] - p["gls"]["gap_pct"] for p in pairs) / len(pairs))
+    return math.exp(sum(logs) / len(logs)), sum(diffs) / len(diffs), no_runs
+
+
+def test_paired_gain_with_varied_instances_matches_a_plain_loop_and_names_the_verdict():
+    for shift, verdict in ((0.0, "saves runs"), (0.4, "saves runs, gap unresolved"), (0.7, "costs gap")):
+        rows = _varied(shift)
+        (h,) = paired_gain(rows, "m", "gls", reps=500)
+        ratio, d, _ = _by_hand(rows)
+        assert h["cells"] == 2 and h["instances"] == 2 * len(TEST_SEEDS)
+        assert h["run_ratio"] == pytest.approx(ratio, abs=1e-9) and h["d_gap"] == pytest.approx(d, abs=1e-9)
+        assert h["run_ratio_lo"] < h["run_ratio"] < h["run_ratio_hi"] and h["d_gap_lo"] < h["d_gap"] < h["d_gap_hi"]
+        assert h["verdict"] == verdict, (shift, h)
+
+
+def test_paired_gain_counts_a_cell_where_no_instance_made_runs():
+    rows = _varied(0.0, zero_cell=True)
+    (h,) = paired_gain(rows, "m", "gls", reps=500)
+    ratio, d, none = _by_hand(rows)
+    assert none == h["no_runs"] == len(TEST_SEEDS)
+    assert h["run_ratio"] == pytest.approx(ratio, abs=1e-9) and h["d_gap"] == pytest.approx(d, abs=1e-9)
+    assert h["run_ratio_lo"] < h["run_ratio"] < h["run_ratio_hi"] and h["d_gap_lo"] < h["d_gap"] < h["d_gap_hi"]

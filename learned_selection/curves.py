@@ -243,8 +243,9 @@ def paired_gain(rows, method, baseline, runs_key="quantum_runs", config=HEADLINE
     the method's runs over the baseline's (an instance where either made no runs is left out and counted in
     `no_runs`), and D, the mean of the method's gap minus the baseline's. run_ratio is the geometric mean of R over
     cells and d_gap the mean of D, each with a 95% bootstrap CI that draws instances with replacement within each
-    cell. The verdict is "saves runs" if the run_ratio CI lies below 1 and the d_gap CI's upper end below
-    PAIRED_MARGIN, "costs gap" if its lower end lies above PAIRED_MARGIN, else "no clear change"."""
+    cell. The verdict is "costs gap" if the d_gap CI's lower end lies above PAIRED_MARGIN; else, if the run_ratio CI
+    lies below 1, "saves runs" when the d_gap CI's upper end is below PAIRED_MARGIN and "saves runs, gap unresolved"
+    when it is not; else "no clear change"."""
     tables = _tables([r for r in rows if r["seed"] in seeds])
     cfg, base = (method, *config), (baseline, *(base_config or config))
     rng = np.random.default_rng(seed)
@@ -271,8 +272,10 @@ def paired_gain(rows, method, baseline, runs_key="quantum_runs", config=HEADLINE
         some = defined.any(0)
         r_lo, r_hi = ci(np.exp(np.where(defined, LB, 0.0).sum(0)[some] / defined.sum(0)[some]))
         d_lo, d_hi = ci(DB.mean(0))
-        verdict = ("saves runs" if r_hi is not None and r_hi < 1 and d_hi < PAIRED_MARGIN else
-                   "costs gap" if d_lo > PAIRED_MARGIN else "no clear change")
+        saves = r_hi is not None and r_hi < 1
+        verdict = ("costs gap" if d_lo > PAIRED_MARGIN else
+                   "saves runs" if saves and d_hi < PAIRED_MARGIN else
+                   "saves runs, gap unresolved" if saves else "no clear change")
         out.append(dict(pool=pool, method=method, baseline=baseline, runs_key=runs_key, cells=len(pts),
                         instances=instances, no_runs=no_runs,
                         run_ratio=float(np.exp(L[np.isfinite(L)].mean())) if np.isfinite(L).any() else None,

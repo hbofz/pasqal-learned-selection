@@ -9,7 +9,7 @@ cost: it is printed and saved, never added to a benchmark's per-instance runs.
     uv run python -m learned_selection.pg --init models/dgin-h4.pt --stack dgin-h2+dgin-h5 --models models \\
         --c 0.01 --out cache/pg
 """
-import argparse, functools, io, json, multiprocessing, os, random, shutil, time
+import argparse, functools, io, json, os, random, shutil, time
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +17,7 @@ import torch
 
 from .az import _cpu_s
 from .bench import KIND_EXT, method_hooks, parse_method
+from .builder import _close, _map, _open_pool, _refuse_changed
 from .dataset import _commit
 from .engine import run_code_bounded
 from .gnn import encode, load_gnn, save_gnn
@@ -137,8 +138,11 @@ def main(argv=None) -> None:
     out, models = Path(a.out), Path(a.models)
     out.mkdir(parents=True, exist_ok=True)
     t, cpu0, wall0 = 0, 0.0, 0.0
+    settings = dict(c=a.c, seed=a.seed, stack=a.stack, lr=a.lr, init=str(a.init), instances=a.instances,
+                    rollouts=a.rollouts)
     if (out / "state.pt").exists():
         saved = torch.load(out / "state.pt", weights_only=True)
+        _refuse_changed(saved.get("settings", {}), settings)
         net.load_state_dict(saved["net"])
         opt.load_state_dict(saved["opt"])
         t, cpu0, wall0 = saved["t"], saved["cpu"], saved["wall"]
@@ -157,19 +161,23 @@ def main(argv=None) -> None:
 
     def save_state():
         state = dict(net=net.state_dict(), opt=opt.state_dict(), t=t, cpu=cpu0 + _cpu_s() - cpu_start,
-                     wall=wall0 + time.perf_counter() - start)
+                     wall=wall0 + time.perf_counter() - start, settings=settings)
         _atomic(lambda p: torch.save(state, p), out / "state.pt")
         return state
 
-    def new_pool():
-        return multiprocessing.get_context("spawn").Pool(a.workers, torch.set_num_threads, (1,)) if a.workers > 1 else None
+    def write_meta(state, where):
+        meta = dict(iter=t, iters=a.iters, c=a.c, seed=a.seed, lr=a.lr, stack=a.stack, init=str(a.init),
+                    cpu_s=state["cpu"], wall_s=state["wall"], commit=_commit())
+        _atomic(lambda p: p.write_text(json.dumps(meta, indent=2)), where / "train_meta_pg-h4.json")
 
-    def stop(pool):
-        if pool:
-            pool.close()
-            pool.join()   # a child's CPU is counted only once it has been waited for
+    def checkpoint():
+        save_model()
+        state = save_state()
+        for where in (out / f"it{t}", out):
+            write_meta(state, where)
+        return state
 
-    pool = new_pool() if t < a.iters else None
+    state, pool = None, _open_pool(a.workers) if t < a.iters else None
     while t < a.iters:
         t += 1
         step = time.perf_counter()
@@ -178,7 +186,7 @@ def main(argv=None) -> None:
         blob = _blob(net)
         jobs = [(blob, a.stack, models, f, p, n, s, base * 1000 + i * 10 + j, a.c)
                 for i, (f, p, n, s) in enumerate(batch) for j in range(a.rollouts)]
-        results = (pool.map(rollout_job, jobs, chunksize=2) if pool else list(map(rollout_job, jobs)))
+        results = _map(pool, rollout_job, jobs)
         row = dict(t=t, size=float(np.mean([r["size"] for r in results])), runs=float(np.mean([r["runs"] for r in results])),
                    reward=float(np.mean([r["reward"] for r in results])), **pg_update(net, opt, results),
                    seconds=time.perf_counter() - step)
@@ -187,16 +195,12 @@ def main(argv=None) -> None:
         print(f"it {t}: size {row['size']:.2f} runs {row['runs']:.1f} reward {row['reward']:.3f} "
               f"decisions {row['decisions']} {row['seconds']:.1f} s", flush=True)
         if t % a.every == 0:
-            stop(pool)   # so the saved CPU total includes the workers; they hold no state, a fresh pool follows
-            save_model()
-            save_state()
-            pool = new_pool() if t < a.iters else None
-    stop(pool)
-    if t % a.every:
-        save_model()
-    state = save_state()
-    (out / "train_meta_pg-h4.json").write_text(json.dumps(
-        dict(c=a.c, seed=a.seed, cpu_s=state["cpu"], wall_s=state["wall"], commit=_commit()), indent=2))
+            _close(pool)   # so the saved CPU total includes the workers; they hold no state, a fresh pool follows
+            state = checkpoint()
+            pool = _open_pool(a.workers) if t < a.iters else None
+    _close(pool)
+    if state is None or t % a.every:
+        state = checkpoint()
     print(f"{t} iterations, cpu {state['cpu']:.0f} s, wall {state['wall']:.0f} s", flush=True)
 
 
