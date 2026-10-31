@@ -1,8 +1,9 @@
 import json, numpy as np, pytest
-from learned_selection.bench import (BEAM_METHODS, NEW_METHODS, ORACLE_METHODS, gap_pct, parse_method, run_instance,
-                                     shard, main as bench_main)
+from learned_selection.bench import (BEAM_METHODS, NEW_METHODS, ORACLE_METHODS, gap_pct, grid, known_method,
+                                     parse_method, run_instance, search_of, shard, track_of, main as bench_main)
 from learned_selection.curves import bootstrap_ci, curve_gain, load, paired
 from learned_selection.features import PIECE_FEATURES, VERTEX_FEATURES
+from learned_selection.instances import TEST_SEEDS, TRAIN_SEEDS, VAL_SEEDS
 from learned_selection.models import fit_lgbm, fit_linear, save
 
 KEYS = {"family", "params", "n", "p", "seed", "method", "track", "k", "s", "l", "restarts", "lattice",
@@ -110,3 +111,89 @@ def test_a_gnn_file_with_the_wrong_head_is_refused(tmp_path):
     save_gnn(GNN("gin", "vertex", np.zeros(d), np.ones(d), np.zeros(p), np.ones(p)), tmp_path / "gin-h4.pt")
     with pytest.raises(ValueError, match=r"gin-h4\.pt.*'vertex'.*'piece'"):
         method_runner("gin-h4", tmp_path)
+
+
+def test_sel_grid_is_training_settings_on_unused_seeds():
+    g = grid("sel")
+    assert len(g) == 8 * 2 * 20 and {s for *_, s in g} == set(range(105, 125))
+    assert not {s for *_, s in g} & (set(TEST_SEEDS) | set(TRAIN_SEEDS) | set(VAL_SEEDS))
+
+
+def test_parse_method_with_new_kinds_and_search():
+    assert parse_method("dlin-h2h4+dsage-h5") == [("dlin", "h2"), ("dlin", "h4"), ("dsage", "h5")]
+    assert parse_method("lin-h2+gin-h4+sage-h5+mcts") == [("lin", "h2"), ("gin", "h4"), ("sage", "h5")]
+    assert search_of("lin-h2+gin-h4+sage-h5+mcts") == 1.0
+    assert search_of("lin-h2+gin-h4+sage-h5+mcts-c0.5") == 0.5
+    assert search_of("lin-h2h4+sage-h5") is None
+    with pytest.raises(ValueError):
+        parse_method("lin-h2+gin-h4+mcts")     # no value model
+    with pytest.raises(ValueError):
+        parse_method("mcts")
+
+
+def test_known_method_and_track():
+    assert known_method("dgin-h2h4h5") and known_method("gls") and known_method("exact")
+    assert not known_method("foo-h2")
+    assert track_of("gls-screen") == "hybrid" and track_of("exact-h5") == "oracle"
+    assert track_of("dgin-h2h4h5") == "structure"
+    assert track_of("lin-h2+gin-h4+sage-h5+mcts") == "structure" and track_of("greedy-mindeg") == "classical"
+    assert track_of("exact") == "classical"
+
+
+def test_an_unknown_name_has_no_runner():
+    from learned_selection.bench import method_runner
+    with pytest.raises(ValueError):
+        method_runner("foo-h2", None)
+
+
+def test_parse_method_with_builder_and_tilt():
+    from learned_selection.bench import tilt_of
+    assert parse_method("bld-h3+dgin-h4+dgin-h5") == [("bld", "h3"), ("dgin", "h4"), ("dgin", "h5")]
+    assert parse_method("dgin-h2h4h5+tilt-0.1") == [("dgin", "h2"), ("dgin", "h4"), ("dgin", "h5")]
+    assert parse_method("bld-h3+sage-h4+dsage-h5+mcts-c0.5")[0] == ("bld", "h3")
+    assert tilt_of("dgin-h2h4h5+tilt-0.1") == 0.1 and tilt_of("dgin-h2h4h5") is None
+    assert known_method("dgin-h2+pg-h4+dgin-h5") and known_method("bld-h3+bgin-h4+bgin-h5")
+    for bad in ("gin-h3", "bld-h2", "bld-h3+gin-h2+gin-h4", "lin-h2+tilt-0.1", "dgin-h2h4h5+tilt-0.1+mcts",
+                "dgin-h2h4h5+mcts+tilt-0.1", "bld-h3+gin-h4+mcts", "tilt-0.1"):
+        with pytest.raises(ValueError):
+            parse_method(bad)
+
+
+def test_tilt_adds_beta_times_size_to_the_rank(tmp_path):
+    import networkx as nx
+    from learned_selection.bench import method_hooks
+    rng = np.random.default_rng(0)
+    for hook, d in (("h2", len(VERTEX_FEATURES)), ("h4", len(PIECE_FEATURES))):
+        X, g, y = rng.standard_normal((60, d)), np.repeat(np.arange(6), 10), rng.integers(0, 3, 60)
+        save(fit_linear(X, y, g), tmp_path / f"lin-{hook}.json")
+    G = nx.path_graph(6)
+    maps = [{0: 0}, {1: 0, 2: 1, 3: 2}]
+    plain = method_hooks("lin-h2h4", tmp_path)["rank"](G, maps)
+    tilted = method_hooks("lin-h2h4+tilt-0.5", tmp_path)["rank"](G, maps)
+    assert np.allclose(np.asarray(tilted) - np.asarray(plain), [0.5, 1.5], atol=1e-9)
+
+
+def test_new_grids_use_their_own_seeds():
+    from learned_selection.instances import FRESH_SEEDS, SEL_SEEDS
+    assert {i[3] for i in grid("fresh")} == set(FRESH_SEEDS) and len(grid("fresh")) == len(grid("test"))
+    cells = lambda name: {(f, json.dumps(p), n) for f, p, n, _ in grid(name)}
+    assert cells("fresh") == cells("test")
+    assert {i[3] for i in grid("train")} == set(TRAIN_SEEDS) and len(grid("train")) == 480
+    assert not set(FRESH_SEEDS) & (set(TEST_SEEDS) | set(SEL_SEEDS) | set(TRAIN_SEEDS) | set(VAL_SEEDS))
+    assert FRESH_SEEDS == range(1020, 1040)
+
+
+def test_bandit_names_are_known_and_track_structure():
+    assert known_method("bandit-i") and known_method("bandit-r")
+    assert track_of("bandit-i") == "structure" and track_of("bandit-r") == "structure"
+    with pytest.raises(ValueError):
+        parse_method("bandit-i")
+
+
+def test_a_bandit_name_routes_to_its_runner(tmp_path, monkeypatch):
+    from learned_selection import bandit
+    from learned_selection.bench import method_runner
+    monkeypatch.setattr(bandit, "instance_runner", lambda d: ("instance", d))
+    assert method_runner("bandit-i", tmp_path) == ("instance", tmp_path)
+    monkeypatch.setattr(bandit, "round_runner", lambda d: ("round", d))
+    assert method_runner("bandit-r", tmp_path) == ("round", tmp_path)

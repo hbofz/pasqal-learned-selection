@@ -25,16 +25,17 @@ DEFERRED_TIME_LIMIT_S = 120.0
 
 
 def collect_states(G: nx.Graph, k: int = 4, s: int = 2, l: int = 10, max_states: int = 12,
-                   seed: int = 0) -> list[nx.Graph]:
+                   seed: int = 0, score=None, rank=None, value=None, build=None) -> list[nx.Graph]:
     """The distinct graphs (by node set) the beam hands to the generator on G, in visit order; the first is G
-    itself. When there are more than max_states, G plus a seeded random sample of the rest, still in visit order."""
-    generate, seen = gls_generator(), {}
+    itself. When there are more than max_states, G plus a seeded random sample of the rest, still in visit order.
+    With score, rank, value or build the beam is the one that policy runs, so the states are the ones it visits."""
+    generate, seen = gls_generator(score=score, rank=rank, build=build), {}
 
     def record(g: nx.Graph, k: int):
         seen.setdefault(frozenset(g), g)
         return generate(g, k)
 
-    run_beam(G, record, exact_piece_solver, k, s, code_prune(k, l, count_small=True))
+    run_beam(G, record, exact_piece_solver, k, s, code_prune(k, l, count_small=True, value=value))
     states = list(seen.values())
     if len(states) > max_states:
         rest = sorted(random.Random(seed).sample(range(1, len(states)), max_states - 1))

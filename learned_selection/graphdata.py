@@ -7,7 +7,7 @@ and every child (what is left after committing to one of a candidate's sets) wit
     uv run python -m learned_selection.graphdata --split train --workers 12 --out cache/train_graphs.pkl
     uv run python -m learned_selection.graphdata --summary cache/train_graphs.pkl [more.pkl ...]
 """
-import argparse, os, pickle, time
+import argparse, functools, os, pickle, time
 from collections import Counter
 from multiprocessing import Pool
 from pathlib import Path
@@ -16,20 +16,21 @@ import networkx as nx
 import numpy as np
 
 from . import instances
-from .bench import shard
+from .bench import method_hooks, shard
 from .dataset import (DEFERRED_TIME_LIMIT_S, HOOKS, _commit, _setting_name, children_values, collect_states,
                       mis_membership)
 from .engine import gls_generator
-from .instances import TEST_SEEDS, make
+from .instances import SEL_SEEDS, TEST_SEEDS, make
 
 
-def state_record(g: nx.Graph, first: bool, time_limit_s: float, workers: int) -> dict:
-    """One labelled state. Node indices are positions in list(g). member, alpha and q are None when unproven;
-    children holds the children proven before the first unproven solve."""
+def state_record(g: nx.Graph, first: bool, time_limit_s: float, workers: int, score=None, build=None) -> dict:
+    """One labelled state, its candidates grown with `score` (the GLS priority when None) or made by `build`.
+    Node indices are positions in list(g). member, alpha and q are None when unproven; children holds the
+    children proven before the first unproven solve."""
     nodes = list(g)
     at = {v: i for i, v in enumerate(nodes)}
     member = mis_membership(g, time_limit_s, workers)
-    maps = gls_generator()(g, len(g))
+    maps = gls_generator(score=score, build=build)(g, len(g))
     q, children = children_values(g, maps, time_limit_s=time_limit_s, workers=workers)
     return dict(
         n=len(g),
@@ -52,21 +53,27 @@ def graph_of(rec: dict) -> nx.Graph:
 
 
 def label_graphs(family: str, params: dict, n: int, seed: int, max_states: int = 12,
-                 time_limit_s: float = 60.0, big: int = 100) -> dict:
-    """Label the states of one instance. States of at most `big` nodes are labelled here; larger ones come back
-    in `deferred` as (graph, first) to be labelled with more time and more workers. A state with unproven
-    labels keeps its record (the unproven fields are None) and is counted in `dropped` by (hook, first)."""
+                 time_limit_s: float = 60.0, big: int = 100, policy: str | None = None,
+                 models_dir="models") -> dict:
+    """Label the states of one instance. With a policy (a method name), the states are those its beam visits
+    and the candidates those its growth score generates; hooks are loaded here. States of at most `big` nodes
+    are labelled here; larger ones come back in `deferred` as (graph, first) to be labelled with more time and
+    more workers. A state with unproven labels keeps its record (the unproven fields are None) and is counted in
+    `dropped` by (hook, first)."""
     if seed in TEST_SEEDS:
         raise ValueError(f"seed {seed} is a test seed; it must not be used for training data")
+    if seed in SEL_SEEDS:
+        raise ValueError(f"seed {seed} is a selection seed; it must not be used for training data")
     start = time.process_time()
+    hooks = method_hooks(policy, models_dir) if policy else {}
     G = make(family, n, seed, **params)
     out = dict(states=[], deferred=[], dropped=Counter())
-    for g in collect_states(G, max_states=max_states, seed=seed):
+    for g in collect_states(G, max_states=max_states, seed=seed, **hooks):
         first = set(g) == set(G)
         if len(g) > big:
             out["deferred"].append((g, first))
             continue
-        rec = state_record(g, first, time_limit_s, 1)
+        rec = state_record(g, first, time_limit_s, 1, score=hooks.get("score"), build=hooks.get("build"))
         out["states"].append(rec)
         _count_dropped(out["dropped"], (), rec)
     out["cpu_s"] = time.process_time() - start
@@ -80,15 +87,16 @@ def _count_dropped(dropped: Counter, tag: tuple, rec: dict) -> None:
             dropped[(*tag, hook, rec["first"])] += 1
 
 
-def _label_job(job: tuple) -> dict:
-    return label_graphs(*job)
+def _label_job(job: tuple, max_states: int = 12, policy: str | None = None, models_dir="models") -> dict:
+    return label_graphs(*job, max_states=max_states, policy=policy, models_dir=models_dir)
 
 
 def _defer_job(args: tuple) -> tuple[dict, float]:
     """Label one deferred state; the CPU time is measured here, in the worker that spent it."""
-    g, first = args
+    g, first, policy, models_dir = args
     start = time.process_time()
-    rec = state_record(g, first, DEFERRED_TIME_LIMIT_S, 8)
+    hooks = method_hooks(policy, models_dir) if policy else {}
+    rec = state_record(g, first, DEFERRED_TIME_LIMIT_S, 8, score=hooks.get("score"), build=hooks.get("build"))
     return rec, time.process_time() - start
 
 
@@ -130,6 +138,9 @@ def main(argv=None) -> None:
     ap.add_argument("--split", choices=["train", "val"])
     ap.add_argument("--workers", type=int)
     ap.add_argument("--out")
+    ap.add_argument("--policy", metavar="METHOD", help="label the states and candidates this method visits, not GLS's")
+    ap.add_argument("--models", default="models", help="directory of the policy's model files")
+    ap.add_argument("--max-states", type=int, default=12)
     ap.add_argument("--shard", help="I/N: run every N-th job starting at I")
     ap.add_argument("--summary", nargs="+", metavar="PATH", help="print the summary of these files and exit")
     a = ap.parse_args(argv)
@@ -149,8 +160,9 @@ def main(argv=None) -> None:
         rec.update(setting=_setting_name(job[0], job[1]), instance_n=job[2], seed=job[3])
         states.append(rec)
 
+    label = functools.partial(_label_job, max_states=a.max_states, policy=a.policy, models_dir=a.models)
     with Pool(a.workers) as pool:
-        for i, (job, r) in enumerate(zip(jobs, pool.imap(_label_job, jobs)), 1):
+        for i, (job, r) in enumerate(zip(jobs, pool.imap(label, jobs)), 1):
             tag = (_setting_name(job[0], job[1]), job[2])
             for rec in r["states"]:
                 add(job, rec)
@@ -163,23 +175,25 @@ def main(argv=None) -> None:
     if deferred:
         with Pool(max(1, (os.cpu_count() or 1) // 8)) as pool:
             for i, ((job, _, _), (rec, cpu)) in enumerate(
-                    zip(deferred, pool.imap(_defer_job, [(g, f) for _, g, f in deferred])), 1):
+                    zip(deferred, pool.imap(_defer_job, [(g, f, a.policy, a.models) for _, g, f in deferred])), 1):
                 add(job, rec)
                 _count_dropped(dropped, (_setting_name(job[0], job[1]), job[2]), rec)
                 cpu_s += cpu
                 print(f"pass 2: {i}/{len(deferred)} deferred states", flush=True)
 
     per_setting = Counter((_setting_name(f, p), n) for f, p, n, _ in jobs)
-    meta = dict(split=a.split, shard=a.shard, instances=len(jobs), states=len(states),
-                counts=hook_counts(states),
+    meta = dict(split=a.split, shard=a.shard, policy=a.policy, max_states=a.max_states,
+                instances=len(jobs), states=len(states), counts=hook_counts(states),
                 settings=[dict(setting=s, n=n, instances=c) for (s, n), c in per_setting.items()],
                 deferred_states=len(deferred),
                 dropped=[dict(setting=s, n=n, hook=h, first=bool(f), count=c) for (s, n, h, f), c in dropped.items()],
                 label_cpu_s=cpu_s, commit=commit)
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    with open(out, "wb") as f:
+    tmp = out.with_name(out.name + ".tmp")
+    with open(tmp, "wb") as f:
         pickle.dump(dict(meta=meta, states=states), f)
+    os.replace(tmp, out)
     summarize([meta], states)
 
 

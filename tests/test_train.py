@@ -54,3 +54,77 @@ def test_value_selection_prefers_lower_regret_then_lower_child_error():
     a, b = dict(prune_regret=0.0, child_mae=0.3), dict(prune_regret=0.0, child_mae=0.5)
     assert _better(a, b) and not _better(b, a)
     assert _better(dict(prune_regret=0.0, child_mae=9.0), dict(prune_regret=0.1, child_mae=0.1))
+
+def test_load_states_refuses_selection_seeds(tmp_path):
+    import pickle
+    path = tmp_path / "x.pkl"
+    path.write_bytes(pickle.dumps({"meta": {}, "states": [dict(setting="er(p=0.25)", seed=105)]}))
+    with pytest.raises(ValueError):
+        load_states([path])
+
+def _er_states(count, seed0=0):
+    return [dict(state_record(erdos_renyi(30, 0.1, s), True, 20.0, 1), setting="er(p=0.1)", instance_n=30, seed=s)
+            for s in range(seed0, seed0 + count)]
+
+def test_jobs_accept_dagger_and_linear_rankers():
+    from learned_selection import train
+    assert train._jobs("dlin-h2,dsage-h5,lin-h4,gin-h2") == [("dlin-h2", "lin", "h2"), ("dsage-h5", "sage", "h5"),
+                                                             ("lin-h4", "lin", "h4"), ("gin-h2", "gin", "h2")]
+    for bad in ("lgb-h2", "dlgb-h2", "gin-h3", "dfoo-h2"):
+        with pytest.raises(SystemExit):
+            train._jobs(bad)
+
+def test_linear_ranker_job_learns_the_planted_order_of_a_state(tmp_path):
+    from learned_selection.features import PIECE_FEATURES, piece_features, vertex_features
+    from learned_selection.graphdata import graph_of
+    from learned_selection.models import load, save, topk_regret
+    from learned_selection.train import fit_linear_ranker_job
+    # h4: the planted value falls with the size of the closed neighbourhood, so the size rule is wrong
+    states = _er_states(16)
+    for rec in states:
+        pf = piece_features(graph_of(rec), [set(p.tolist()) for p in rec["pieces"]])
+        rec["q"] = np.round(-pf[:, PIECE_FEATURES.index("closed_nbhd")]).astype(np.int64)
+    model, info = fit_linear_ranker_job("h4", states[:10], states[10:], workers=2)
+    assert info["rule_regret"] > 0 and info["val_regret"] < info["rule_regret"] and info["val_regret"] < 0.5
+    assert (info["train_states"], info["val_states"]) == (10, 6) and info["seconds"] >= 0
+    save(model, tmp_path / "lin-h4.json")
+    pf = piece_features(graph_of(states[0]), [set(p.tolist()) for p in states[0]["pieces"]])
+    assert np.allclose(load(tmp_path / "lin-h4.json").predict(pf), model.predict(pf))
+    # h2: the planted label marks the highest-degree vertices
+    for rec in states:
+        deg = np.bincount(rec["edges"].ravel(), minlength=rec["n"])
+        rec["member"] = (deg == deg.max()).astype(np.int8)
+    model, info = fit_linear_ranker_job("h2", states[:10], states[10:])
+    assert info["val_regret"] < info["rule_regret"] and info["val_regret"] < 0.1
+    assert model.predict(vertex_features(graph_of(states[0]))[1]).shape == (30,)
+
+def test_linear_ranker_job_skips_unproven_states():
+    from learned_selection.train import fit_linear_ranker_job
+    states = _er_states(8)
+    unproven = [dict(s, member=None, q=None, alpha=None) for s in states[:3]]
+    no_pieces = [dict(s, pieces=[], q=np.zeros(0, dtype=np.int64)) for s in states[3:5]]
+    for hook in ("h2", "h4"):
+        _, info = fit_linear_ranker_job(hook, unproven + no_pieces + states[5:], unproven + states[5:])
+        assert info["train_states"] == (5 if hook == "h2" else 3)   # candidate-less states only count for h2
+        assert info["val_states"] == 3
+    with pytest.raises(ValueError):
+        fit_linear_ranker_job("h2", unproven, states)
+
+def test_main_names_files_by_job_for_linear_rankers(tmp_path, capsys):
+    import json, pickle
+    from learned_selection.train import main
+    path = tmp_path / "s.pkl"
+    path.write_bytes(pickle.dumps({"meta": {}, "states": _er_states(6)}))
+    main(["--train", str(path), "--val", str(path), "--jobs", "dlin-h2,lin-h4", "--out", str(tmp_path / "o"),
+          "--workers", "1"])
+    assert sorted(p.name for p in (tmp_path / "o").iterdir()) == [
+        "dlin-h2.json", "lin-h4.json", "train_meta_dlin-h2.json", "train_meta_lin-h4.json"]
+    assert json.loads((tmp_path / "o" / "train_meta_dlin-h2.json").read_text())["job"] == "dlin-h2"
+    assert "dlin-h2: val regret" in capsys.readouterr().out
+
+def test_jobs_accept_a_builder_stack_prefix():
+    from learned_selection import train
+    assert train._jobs("bgin-h4,bgin-h5") == [("bgin-h4", "gin", "h4"), ("bgin-h5", "gin", "h5")]
+    for bad in ("blin-h2x", "bfoo-h2"):
+        with pytest.raises(SystemExit):
+            train._jobs(bad)

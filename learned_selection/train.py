@@ -2,8 +2,11 @@
 
 Rankers (jobs `conv-h2` and `conv-h4`) learn which vertices of a state are in a maximum independent set, and which
 candidate piece has the best continuation. They start by imitating GLS's own choice (a warm start), then fit the
-exact labels, keeping the epoch with the lowest validation top-k regret. Value models (jobs `conv-h5` and
+exact labels, keeping the epoch with the lowest validation top-k regret. `lin-h2` and `lin-h4` are the ridge
+counterparts on the structural features. Value models (jobs `conv-h5` and
 `lin-h5`) predict the independence number of a graph, and are kept at the lowest validation pruning regret.
+A leading `d` on a job name (`dgin-h4`) marks a model trained on the states of a policy's own visits; it trains
+the same way and only the file name differs.
 
     uv run python -m learned_selection.train --train cache/graphs_train_*.pkl --val cache/graphs_val_*.pkl \\
         --jobs gin-h2,gin-h4,gin-h5,lin-h5 --out models/ --threads 6 --workers 12
@@ -18,10 +21,10 @@ import numpy as np
 # models comes before gnn: lightgbm is imported lazily inside models, so this process never holds both lightgbm
 # and torch (on macOS their OpenMP runtimes clash).
 from .dataset import _commit, _setting_name
-from .features import PIECE_FEATURES, VERTEX_FEATURES, graph_features
+from .features import PIECE_FEATURES, VERTEX_FEATURES, graph_features, piece_features, vertex_features
 from .graphdata import graph_of
-from .instances import HELD_OUT_SETTINGS, TEST_SEEDS
-from .models import fit_value_linear, save, topk_regret
+from .instances import HELD_OUT_SETTINGS, SEL_SEEDS, TEST_SEEDS
+from .models import fit_linear, fit_value_linear, save, topk_regret
 
 import torch
 from .gnn import CONVS, GNN, collate, encode, save_gnn
@@ -34,13 +37,13 @@ _QUIET = lambda *_: None
 
 
 def load_pickles(paths) -> tuple[list[dict], list[dict]]:
-    """(the meta of each file, the concatenated states). Refuses test seeds and held-out settings."""
+    """(the meta of each file, the concatenated states). Refuses test and selection seeds and held-out settings."""
     loaded = [pickle.load(open(p, "rb")) for p in paths]
     states = [r for d in loaded for r in d["states"]]
     held_out = {_setting_name(f, p) for f, p in HELD_OUT_SETTINGS}
     for r in states:
-        if r["seed"] in TEST_SEEDS:
-            raise ValueError(f"seed {r['seed']} is a test seed; it must not be used for training or validation")
+        if r["seed"] in TEST_SEEDS or r["seed"] in SEL_SEEDS:
+            raise ValueError(f"seed {r['seed']} is a test or selection seed; it must not train or validate")
         if r["setting"] in held_out:
             raise ValueError(f"setting {r['setting']} is held out; it must not be used for training or validation")
     return [d["meta"] for d in loaded], states
@@ -338,12 +341,45 @@ def fit_linear_value_job(train: list[dict], val: list[dict], cap: int = 64):
                        rows=len(y["alpha"]), val_rows=len(v["alpha"]), seconds=time.perf_counter() - start)
 
 
+def _linear_rows(job: tuple):
+    """Runs in a worker and returns numpy arrays (X, y) for one state. job = (hook, n, edges, pieces, y)."""
+    hook, n, edges, pieces, y = job
+    g = graph_of(dict(n=n, edges=edges))
+    X = vertex_features(g)[1] if hook == "h2" else piece_features(g, [set(p.tolist()) for p in pieces])
+    return X, y
+
+
+def fit_linear_ranker_job(hook: str, train: list[dict], val: list[dict], workers: int = 1):
+    """Weighted ridge on the within-state order of the vertex features (h2, y = member) or the piece features
+    (h4, y = q), each state weighted by its node count as in models.main. Returns the model and an info dict."""
+    start = time.perf_counter()
+    key, rule, names, k = (("member", "gls_term", VERTEX_FEATURES, 1) if hook == "h2"
+                           else ("q", "size", PIECE_FEATURES, 4))
+
+    def rows(states):
+        used = [r for r in states if r[key] is not None and r["n"] > 0 and (hook == "h2" or len(r["pieces"]))]
+        if not used:
+            raise ValueError(f"no states with a proven {key} label to train or validate on")
+        out = _pmap(_linear_rows, [(hook, r["n"], r["edges"], r["pieces"], r[key]) for r in used], workers)
+        sizes = np.array([len(y) for _, y in out])
+        return (np.concatenate([X for X, _ in out]), np.concatenate([y for _, y in out]).astype(np.float64),
+                np.repeat(np.arange(len(used)), sizes), np.repeat([r["n"] for r in used], sizes).astype(np.float64))
+    X, y, g, w = rows(train)
+    Xv, yv, gv, _ = rows(val)
+    model = fit_linear(X, y, g, w)
+    return model, dict(val_regret=float(topk_regret(model.predict(Xv), yv, gv, k)),
+                       rule_regret=float(topk_regret(Xv[:, names.index(rule)], yv, gv, k)),
+                       train_states=int(g[-1]) + 1, val_states=int(gv[-1]) + 1, seconds=time.perf_counter() - start)
+
+
 def _jobs(spec: str) -> list[tuple[str, str, str]]:
     jobs = []
     for job in spec.split(","):
         conv, _, hook = job.partition("-")
-        if hook not in ("h2", "h4", "h5") or (conv not in CONVS and (conv, hook) != ("lin", "h5")):
-            raise SystemExit(f"unknown job {job!r}; use {{{','.join(CONVS)}}}-h2|h4|h5 or lin-h5")
+        if conv[:1] in ("d", "b") and conv[1:] in (*CONVS, "lin"):   # d, b: trained on a policy's own states
+            conv = conv[1:]
+        if hook not in ("h2", "h4", "h5") or conv not in (*CONVS, "lin"):
+            raise SystemExit(f"unknown job {job!r}; use [d|b]{{lin,{','.join(CONVS)}}}-h2|h4|h5")
         jobs.append((job, conv, hook))
     return jobs
 
@@ -352,7 +388,7 @@ def main(argv=None) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--train", nargs="+", required=True)
     ap.add_argument("--val", nargs="+", required=True)
-    ap.add_argument("--jobs", required=True, help="comma-separated: conv-h2, conv-h4, conv-h5 or lin-h5")
+    ap.add_argument("--jobs", required=True, help="comma-separated: conv-h2|h4|h5 or lin-h2|h4|h5; a leading d or b marks a policy's or a builder's own states")
     ap.add_argument("--out", required=True)
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--epochs", type=int, default=60)
@@ -367,7 +403,8 @@ def main(argv=None) -> None:
     for job, conv, hook in jobs:
         log = lambda msg: print(f"  {job} {msg}", flush=True)
         if conv == "lin":
-            model, info = fit_linear_value_job(train, val)
+            model, info = (fit_linear_value_job(train, val) if hook == "h5"
+                           else fit_linear_ranker_job(hook, train, val, workers=a.workers))
             save(model, out / f"{job}.json")
         elif hook == "h5":
             net, info = train_value(conv, train, val, a.device, epochs=a.epochs, workers=a.workers, log=log)
@@ -382,8 +419,8 @@ def main(argv=None) -> None:
             line = (f"prune regret {info['prune_regret']:.4f} (rule {info['rule_prune_regret']:.4f}), "
                     f"val mae {info['val_mae']:.3f} (zero {info['mae_of_zero']:.3f})")
         else:
-            line = (f"val regret {info['val_regret']:.4f} (rule {info['rule_regret']:.4f}), "
-                    f"agreement {info['imitation_agreement']:.3f}")
+            line = (f"val regret {info['val_regret']:.4f} (rule {info['rule_regret']:.4f})"
+                    + (f", agreement {info['imitation_agreement']:.3f}" if "imitation_agreement" in info else ""))
         timing = (f", encode {info['encode_seconds']:.0f} s, {info['epochs_run'] + info.get('warm_epochs_run', 0)} epochs"
                   if "encode_seconds" in info else "")
         print(f"{job}: {line}, {info['seconds']:.0f} s{timing}", flush=True)

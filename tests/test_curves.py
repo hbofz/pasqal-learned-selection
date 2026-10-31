@@ -1,6 +1,9 @@
-import json, pytest
-from learned_selection.curves import curve_gain, envelope, gap_at, headline, main, plot, runs_at
-from learned_selection.instances import HELD_OUT_SETTINGS, TEST_SEEDS, TEST_SIZES, TRAIN_SETTINGS, VAL_SEEDS
+import json, numpy as np, pytest
+from learned_selection.curves import (COLORS, PAIRED_MARGIN, _print_settings, _stats, _style, _tables, curve_gain,
+                                      envelope, gap_at, headline, learned_in, main, paired_gain, plot, reward_gain,
+                                      runs_at, summarize)
+from learned_selection.instances import (HELD_OUT_SETTINGS, SEL_SEEDS, TEST_SEEDS, TEST_SIZES, TRAIN_SETTINGS,
+                                         VAL_SEEDS)
 
 # The GLS envelope in these rows runs from (10 runs, 10%) to (100 runs, 5%). At 10**1.5 runs it reads 7.5%, and it
 # reaches 6% at 10**1.8 runs.
@@ -108,3 +111,227 @@ def test_cli_prints_oracle_references_on_val_only(tmp_path, capsys):
         assert ("oracle references (exact value pruning, not a structure-track method)" in out) == (split == "val")
         if split == "val":
             assert out.split("oracle references")[1].count("exact-h5") >= 2 and "-1.58" in out
+
+
+def test_headline_uses_a_methods_own_config():
+    # the method has records at (4, 2, 100) only: with its config it is read, without it there is no row
+    rows = [dict(r, l=100) if r["method"] == "m" else r
+            for r in _rows(FA, PA, 100, SEL_SEEDS, 10 ** 1.5, 6.0, method="m")]
+    assert headline(rows, "quantum_runs", seeds=SEL_SEEDS, methods=["m"]) == []
+    (h,) = headline(rows, "quantum_runs", seeds=SEL_SEEDS, methods=["m"], configs={"m": (4, 2, 100, 1)})
+    assert h["pool"] == "selection" and h["d_gap"] == pytest.approx(-1.5)
+    assert h["d_clamp"] == pytest.approx(-1.5) and h["instances"] == len(SEL_SEEDS)
+
+
+def test_clamped_d_gap_holds_the_envelope_flat_past_its_ends():
+    # baseline points (10 runs, 10%) and (100 runs, 5%)
+    assert _stats([1000.0, 10.0, 100.0], [6.0, 10.0, 5.0])[2] == pytest.approx(1.0)     # dearer: 6 - 5, d_gap undefined
+    assert _stats([1.0, 10.0, 100.0], [6.0, 10.0, 5.0])[2] == pytest.approx(-4.0)       # cheaper: 6 - 10
+    assert _stats([10 ** 1.5, 10.0, 100.0], [6.0, 10.0, 5.0])[2] == pytest.approx(-1.5)  # inside: the same as d_gap
+    assert _stats([0.0, 10.0, 100.0], [6.0, 10.0, 5.0])[2] == pytest.approx(-4.0)       # no runs: the first point
+    assert _stats([5.0], [6.0])[2] is None                                               # no envelope
+
+
+def test_clamped_d_gap_is_defined_where_d_gap_is_not():
+    rows = _rows(FA, PA, 100, TEST_SEEDS[:3], 1000, 6.0)
+    (h,) = headline(rows, "quantum_runs", reps=50)
+    assert h["d_gap"] is None and h["d_clamp"] == pytest.approx(1.0) and h["d_clamp_lo"] == pytest.approx(1.0)
+
+
+def test_plot_and_tables_take_new_kinds_and_search_names(tmp_path, capsys):
+    search, dual = "lin-h2+gin-h4+sage-h5+mcts", "dlin-h2h4+dsage-h5"
+    rows = (_rows(FA, PA, 100, TEST_SEEDS[:3], 10 ** 1.5, 6.0, method=dual)
+            + [r for r in _rows(FA, PA, 100, TEST_SEEDS[:3], 10 ** 1.5, 4.0, method=search) if r["method"] == search])
+    for r in rows:
+        if r["method"] == search:
+            r["l"] = 100
+    summary = summarize(rows, reps=50)
+    assert len(plot(summary, tmp_path)) == 1
+    configs = {search: (4, 2, 100, 1)}
+    _print_settings(_tables(rows), summary, "gls", "quantum_runs", sorted(_tables(rows)), configs)
+    out = capsys.readouterr().out
+    assert dual in out and search in out
+    assert [line for line in out.splitlines() if search in line][0].split()[1] == "3"
+    (h,) = headline(rows, "quantum_runs", reps=50, methods=[search], configs=configs)
+    assert h["method"] == search and h["d_gap"] == pytest.approx(-3.5)
+
+
+def test_cli_sel_split_reads_each_method_at_its_config(tmp_path, capsys):
+    rows = [dict(r, l=100) if r["method"] == "lin-h4" else r for r in
+            _rows(FA, PA, 100, SEL_SEEDS, 10 ** 1.5, 6.0, method="lin-h4") + _rows(FA, PA, 100, TEST_SEEDS[:3], 10 ** 1.5, 9.0)]
+    path = tmp_path / "sel.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    main([str(path), "--out", str(tmp_path / "plots"), "--split", "sel", "--methods", "lin-h4",
+          "--config", "lin-h4=4,2,100"])
+    out = capsys.readouterr().out
+    assert "selection" in out and "-1.58 [-1.58, -1.58]" in out and "9.00" not in out
+
+
+def test_load_passes_exact_duplicates_and_names_conflicting_records(tmp_path):
+    from learned_selection.curves import load
+    rows = _rows(FA, PA, 100, TEST_SEEDS[:2], 10 ** 1.5, 6.0)
+    a, b = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    a.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    b.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    assert len(load([a, b])) == 2 * len(rows)
+    for field in ("size", "quantum_runs"):
+        b.write_text("".join(json.dumps(dict(r, **{field: r[field] + 1}) if r["method"] == "lin-h4" else r) + "\n"
+                             for r in rows))
+        with pytest.raises(ValueError, match="lin-h4"):
+            load([a, b])
+
+
+def test_style_and_plot_take_tilt_builder_and_policy_gradient_names(tmp_path):
+    names = ["dgin-h2h4h5+tilt-0.1", "dgin-h2+pg-h4+dgin-h5", "bld-h3+bgin-h4+bgin-h5"]
+    rows = [dict(family="er", params={"p": 0.25}, n=100, method=m, k=k, s=2, l=10, restarts=1, gap=g, gap_lo=g - 1,
+                 gap_hi=g + 1, quantum_runs=r, pasqal_runs=r)
+            for m in ("gls", *names) for k, r, g in ((2, 10, 9.0), (4, 30, 7.0))]
+    assert len(plot(rows, tmp_path)) == 1
+    assert _style("dgin-h2h4h5+tilt-0.1") != _style("dgin-h2h4h5")
+    assert _style("dgin-h2h4h5+tilt-0.1")[2] == "--"
+    assert _style("dgin-h2+pg-h4+dgin-h5")[0] == _style("bld-h3+bgin-h4+bgin-h5")[0] == COLORS["az"]
+    assert _style("bld-h3+bgin-h4+bgin-h5")[1] == "X" and _style("bgin-h2h4h5")[0] == COLORS["gin"]
+
+
+def _pair_rows(cell, seeds, method, base, config=(4, 2, 10)):
+    """The method's and the baseline's (runs, gap) on each seed as rows at one config; best known 100."""
+    (f, p, n), (k, s, l) = cell, config
+    return [dict(family=f, params=p, n=n, seed=i, method=m, k=k, s=s, l=l, restarts=1, exploded=False,
+                 quantum_runs=r, pasqal_runs=r, over_30=0, gap_pct=g, size=100 - g)
+            for i, a, b in zip(seeds, method, base) for m, (r, g) in (("m", a), ("gls", b))]
+
+
+def test_paired_gain_by_hand():
+    cell, seeds = (FA, PA, TEST_SIZES[0]), TEST_SEEDS
+    base = [(100, 5.0)] * len(seeds)
+    for method, ratio, d, verdict in (([(50, 5.0)] * len(seeds), 0.5, 0.0, "saves runs"),
+                                      ([(100, 6.0)] * len(seeds), 1.0, 1.0, "costs gap"),
+                                      (base, 1.0, 0.0, "no clear change")):
+        (h,) = paired_gain(_pair_rows(cell, seeds, method, base), "m", "gls", reps=50)
+        assert (h["pool"], h["cells"], h["instances"], h["no_runs"]) == ("training", 1, len(seeds), 0)
+        assert h["run_ratio"] == pytest.approx(ratio) and h["d_gap"] == pytest.approx(d)
+        assert h["run_ratio_lo"] == pytest.approx(ratio) and h["d_gap_hi"] == pytest.approx(d)
+        assert h["verdict"] == verdict
+    assert PAIRED_MARGIN == 0.25
+
+
+def test_paired_gain_leaves_out_exploded_and_zero_run_instances():
+    cell, seeds = (FA, PA, TEST_SIZES[0]), TEST_SEEDS[:4]
+    method = [(50, 5.0), (0, 9.0), (200, 5.0), (80, 7.0)]      # seed 1 made no runs, seed 3 exploded
+    rows = _pair_rows(cell, seeds, method, [(100, 5.0)] * 4)
+    for r in rows:
+        r["exploded"] = r["method"] == "m" and r["seed"] == seeds[3]
+    (h,) = paired_gain(rows, "m", "gls", reps=50)
+    assert h["instances"] == 3 and h["no_runs"] == 1
+    assert h["run_ratio"] == pytest.approx(1.0)                # geometric mean of 0.5 and 2
+    assert h["d_gap"] == pytest.approx(4 / 3)                  # (0 + 4 + 0) / 3: the zero-run instance still counts
+    assert paired_gain(rows, "m", "gls", seeds=VAL_SEEDS) == []
+
+
+def test_paired_gain_reads_the_baseline_at_its_own_config():
+    cell, seeds = (FA, PA, TEST_SIZES[0]), TEST_SEEDS[:4]
+    ours = [r for r in _pair_rows(cell, seeds, [(50, 5.0)] * 4, [(0, 0.0)] * 4, config=(2, 2, 5)) if r["method"] == "m"]
+    theirs = [r for r in _pair_rows(cell, seeds, [(0, 0.0)] * 4, [(100, 5.0)] * 4) if r["method"] == "gls"]
+    assert paired_gain(ours + theirs, "m", "gls", config=(2, 2, 5, 1), reps=50) == []
+    (h,) = paired_gain(ours + theirs, "m", "gls", config=(2, 2, 5, 1), base_config=(4, 2, 10, 1), reps=50)
+    assert h["run_ratio"] == pytest.approx(0.5) and h["d_gap"] == pytest.approx(0.0)
+
+
+def _varied(shift, zero_cell=False):
+    """Two cells of 20 varied instances: the method makes about 0.7 of the baseline's runs and its gap differs by
+    `shift` plus noise. With `zero_cell`, the method made no runs in every instance of the second cell."""
+    import random
+    cells, rows = [(FA, PA, TEST_SIZES[0]), (FB, PB, TEST_SIZES[0])], []
+    for c, cell in enumerate(cells):
+        rng = random.Random(c)
+        base = [(rng.uniform(60, 140), rng.uniform(3, 8)) for _ in TEST_SEEDS]
+        method = [(0 if zero_cell and c else b[0] * 0.7 * rng.uniform(0.7, 1.3), b[1] + shift + rng.gauss(0, 0.4)) for b in base]
+        rows += _pair_rows(cell, TEST_SEEDS, method, base)
+    return rows
+
+
+def _by_hand(rows):
+    """Run ratio, mean gap difference and the count of instances without runs, from a plain loop over the cells."""
+    import math
+    cells, no_runs = {}, 0
+    for r in rows:
+        cells.setdefault((r["family"], str(r["params"])), {}).setdefault(r["seed"], {})[r["method"]] = r
+    logs, diffs = [], []
+    for cell in cells.values():
+        pairs = list(cell.values())
+        good = [math.log(p["m"]["quantum_runs"] / p["gls"]["quantum_runs"]) for p in pairs if p["m"]["quantum_runs"] > 0]
+        no_runs += len(pairs) - len(good)
+        if good:
+            logs.append(sum(good) / len(good))
+        diffs.append(sum(p["m"]["gap_pct"] - p["gls"]["gap_pct"] for p in pairs) / len(pairs))
+    return math.exp(sum(logs) / len(logs)), sum(diffs) / len(diffs), no_runs
+
+
+def test_paired_gain_with_varied_instances_matches_a_plain_loop_and_names_the_verdict():
+    for shift, verdict in ((0.0, "saves runs"), (0.4, "saves runs, gap unresolved"), (0.7, "costs gap")):
+        rows = _varied(shift)
+        (h,) = paired_gain(rows, "m", "gls", reps=500)
+        ratio, d, _ = _by_hand(rows)
+        assert h["cells"] == 2 and h["instances"] == 2 * len(TEST_SEEDS)
+        assert h["run_ratio"] == pytest.approx(ratio, abs=1e-9) and h["d_gap"] == pytest.approx(d, abs=1e-9)
+        assert h["run_ratio_lo"] < h["run_ratio"] < h["run_ratio_hi"] and h["d_gap_lo"] < h["d_gap"] < h["d_gap_hi"]
+        assert h["verdict"] == verdict, (shift, h)
+
+
+def test_paired_gain_counts_a_cell_where_no_instance_made_runs():
+    rows = _varied(0.0, zero_cell=True)
+    (h,) = paired_gain(rows, "m", "gls", reps=500)
+    ratio, d, none = _by_hand(rows)
+    assert none == h["no_runs"] == len(TEST_SEEDS)
+    assert h["run_ratio"] == pytest.approx(ratio, abs=1e-9) and h["d_gap"] == pytest.approx(d, abs=1e-9)
+    assert h["run_ratio_lo"] < h["run_ratio"] < h["run_ratio_hi"] and h["d_gap_lo"] < h["d_gap"] < h["d_gap_hi"]
+
+
+def _reward_rows(sizes_runs, method="bandit-i", cfg=(4, 2, 3), base_cfg=(4, 2, 10)):
+    """The method and a baseline on each seed of one training cell; sizes_runs gives (size, runs) per seed for each,
+    None for an exploded run."""
+    rows = []
+    for i, pair in enumerate(sizes_runs):
+        for name, (k, s, l), got in ((method, cfg, pair[0]), ("bld-h3", base_cfg, pair[1])):
+            rows.append(dict(family=FA, params=PA, n=TEST_SIZES[0], seed=TEST_SEEDS[i], method=name, k=k, s=s, l=l,
+                             restarts=1, exploded=got is None, size=got and got[0], quantum_runs=got and got[1]))
+    return rows
+
+
+def _gain(rows, cost, **kw):
+    return reward_gain(rows, "bandit-i", "bld-h3", cost, (4, 2, 3, 1), (4, 2, 10, 1), **kw)
+
+
+def test_reward_gain_by_hand():
+    # one set element larger and 10 runs dearer at cost 0.01: +1 - 0.1
+    rows = _reward_rows([((30 + i % 3, 50), (29 + i % 3, 40)) for i in range(6)])
+    (g,) = _gain(rows, 0.01, reps=200)
+    assert (g["pool"], g["cells"], g["instances"], g["verdict"]) == ("training", 1, 6, "gain")
+    assert g["gain"] == pytest.approx(0.9) and g["lo"] == g["hi"] == pytest.approx(0.9)
+    assert (g["method"], g["baseline"], g["cost"], g["runs_key"]) == ("bandit-i", "bld-h3", 0.01, "quantum_runs")
+    (g,) = _gain(rows, 0.2, reps=200)     # at cost 0.2 the extra runs cost more than the extra element adds
+    assert g["gain"] == pytest.approx(-1.0) and g["verdict"] == "worse"
+
+
+def test_reward_gain_with_varied_instances_and_an_exploded_one():
+    shifts = (-2, 0, 1, 3, -1, 2, 4, 0)
+    rows = _reward_rows([((30 + d, 50), (29, 40)) for d in shifts] + [(None, (29, 40))])
+    (g,) = _gain(rows, 0.01, reps=500)
+    assert g["instances"] == 8 and g["lo"] < g["gain"] < g["hi"] and g["verdict"] == "gain"
+    assert g["gain"] == pytest.approx(np.mean([1 + d for d in shifts]) - 0.1)
+    (g,) = _gain(_reward_rows([((29 + d, 50), (29, 40)) for d in (-3, 3, -2, 2)]), 0.0, reps=500)
+    assert g["verdict"] == "no gain" and g["lo"] < 0 < g["hi"]
+
+
+def test_reward_gain_reads_only_the_seeds_it_is_given():
+    assert _gain(_reward_rows([((31, 50), (29, 40))] * 3), 0.01, seeds=SEL_SEEDS) == []
+
+
+def test_plot_takes_a_bandit_name(tmp_path):
+    summary = [dict(family=FA, params=PA, n=100, method=m, k=4, s=2, l=l, restarts=1, gap=gap, gap_lo=gap - 1,
+                    gap_hi=gap + 1, quantum_runs=runs, pasqal_runs=runs) for m, l, gap, runs in
+               (("bandit-i", 3, 4.0, 50.0), ("bandit-i", 10, 3.0, 90.0), ("bandit-r", 10, 5.0, 60.0),
+                ("gls", 10, 6.0, 40.0))]
+    (path,) = plot(summary, tmp_path)
+    assert path.exists() and _style("bandit-i") != _style("bandit-r")
+    assert "bandit-i" in learned_in(_reward_rows([((31, 50), (29, 40))] * 3))

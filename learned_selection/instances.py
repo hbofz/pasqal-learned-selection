@@ -71,7 +71,10 @@ BIG_SETTINGS = [("er", {"p": 0.25}), ("power_law", {"m": 2})]
 
 TRAIN_SIZES = (60, 100, 150)
 TEST_SIZES = (100, 150)
+SEL_SIZES = (100, 150)
 BIG_N = 300
 TRAIN_SEEDS = range(0, 20)
 VAL_SEEDS = range(100, 105)
+SEL_SEEDS = range(105, 125)
 TEST_SEEDS = range(1000, 1020)
+FRESH_SEEDS = range(1020, 1040)
