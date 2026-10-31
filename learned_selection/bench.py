@@ -19,8 +19,8 @@ import numpy as np
 
 from . import dataset
 from .engine import RunResult, _remove_closed, best_of_restarts, run_code_bounded, run_code_faithful, run_paper_faithful
-from .instances import (BIG_N, BIG_SETTINGS, HELD_OUT_SETTINGS, SEL_SEEDS, SEL_SIZES, TEST_SEEDS, TEST_SIZES,
-                        TRAIN_SETTINGS, VAL_SEEDS, make)
+from .instances import (BIG_N, BIG_SETTINGS, FRESH_SEEDS, HELD_OUT_SETTINGS, SEL_SEEDS, SEL_SIZES, TEST_SEEDS,
+                        TEST_SIZES, TRAIN_SEEDS, TRAIN_SETTINGS, TRAIN_SIZES, VAL_SEEDS, make)
 from .lattice import BLOCKADE_UM
 from .models import h2_score, h4_rank, linear_value, load, load_theta, theta_score
 from .search import run_mcts
@@ -36,6 +36,8 @@ ORACLE_METHODS = ["exact-h5", "lin-h2h4+exact-h5"]
 BEAM_METHODS = ["gls-code", "gls", "gls-paper", "gls-screen", "lin-h2", "lin-h4", "lin-h2h4", "lgb-h2", "lgb-h4",
                 "lgb-h2h4", "cma-h2"] + NEW_METHODS + ORACLE_METHODS
 CLASSICAL_METHODS = ["greedy-pasqal", "greedy-mindeg", "exact"]
+# Selectors that choose among other methods and widths; their names have no hooks, so parse_method refuses them.
+BANDIT_METHODS = ("bandit-i", "bandit-r")
 KIND_EXT = {"lin": ".json", "lgb": ".txt", "gin": ".pt", "sage": ".pt", "gat": ".pt", "dlin": ".json", "dgin": ".pt",
             "dsage": ".pt", "dgat": ".pt", "az": ".pt", "pg": ".pt", "bgin": ".pt", "bld": ".pt"}
 GNN_KINDS = ("gin", "sage", "gat", "dgin", "dsage", "dgat", "az", "pg", "bgin")
@@ -141,7 +143,7 @@ def tilt_of(name: str) -> float | None:
 
 
 def known_method(name: str) -> bool:
-    if name in BEAM_METHODS or name in CLASSICAL_METHODS:
+    if name in BEAM_METHODS or name in CLASSICAL_METHODS or name in BANDIT_METHODS:
         return True
     try:
         return bool(parse_method(name))
@@ -184,7 +186,10 @@ def method_hooks(name: str, models_dir) -> dict:
 
 
 def method_runner(name: str, models_dir, max_branches: int = 1_000) -> Callable[[nx.Graph, int, int, int, int], RunResult]:
-    """run(graph, k, s, l, seed) for a beam method."""
+    """run(graph, k, s, l, seed) for a beam method. A bandit ignores k and s, and reads c = l / 1000."""
+    if name in BANDIT_METHODS:
+        from . import bandit     # lazily, like the models: bandit reaches them through this function
+        return bandit.instance_runner(models_dir) if name == "bandit-i" else bandit.round_runner(models_dir)
     if not known_method(name) or name in CLASSICAL_METHODS:
         raise ValueError(f"unknown beam method {name!r}")
     if search_of(name) is not None:   # l is the budget of counted solves, and max_branches does not apply
@@ -280,6 +285,10 @@ def grid(name: str) -> list[tuple]:
         return [(f, p, 100, s) for f, p in TRAIN_SETTINGS for s in VAL_SEEDS]
     if name == "sel":
         return [(f, p, n, s) for f, p in TRAIN_SETTINGS for n in SEL_SIZES for s in SEL_SEEDS]
+    if name == "train":
+        return [(f, p, n, s) for f, p in TRAIN_SETTINGS for n in TRAIN_SIZES for s in TRAIN_SEEDS]
+    if name == "fresh":
+        return [(f, p, n, s) for f, p in TRAIN_SETTINGS + HELD_OUT_SETTINGS for n in TEST_SIZES for s in FRESH_SEEDS]
     return [(f, p, BIG_N, s) for f, p in BIG_SETTINGS for s in TEST_SEEDS[:10]]
 
 
@@ -307,7 +316,7 @@ def _job(job: tuple, **kw) -> list[dict]:
 
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--grid", choices=["test", "val", "sel", "big"])
+    ap.add_argument("--grid", choices=["test", "val", "sel", "big", "train", "fresh"])
     ap.add_argument("--family")
     ap.add_argument("--params", default="", help='e.g. "p=0.25" or "blocks=4,p_in=0.3,p_out=0.03"')
     ap.add_argument("--n", type=int)

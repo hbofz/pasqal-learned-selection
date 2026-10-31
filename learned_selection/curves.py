@@ -5,7 +5,7 @@ piece sizes, and so run counts, so one width alone can favour either side.
     uv run python -m learned_selection.curves results/eval/val.jsonl --out results/plots-val --split val
 
 Only rows on the split's seeds are read: test seeds by default, validation seeds with --split val, selection seeds
-with --split sel.
+with --split sel, fresh seeds with --split fresh.
 
 Against GLS's lower envelope (the best gap any GLS configuration reaches for its runs):
 - d_gap is a method's mean gap minus the envelope's gap at the method's mean runs. Below 0 is better.
@@ -22,7 +22,8 @@ import numpy as np
 
 from .bench import (BEAM_METHODS, GNN_KINDS, ORACLE_METHODS, gap_pct, known_method, parse_method, search_of, tilt_of,
                     track_of)
-from .instances import HELD_OUT_SETTINGS, SEL_SEEDS, SEL_SIZES, TEST_SEEDS, TEST_SIZES, TRAIN_SETTINGS, VAL_SEEDS
+from .instances import (FRESH_SEEDS, HELD_OUT_SETTINGS, SEL_SEEDS, SEL_SIZES, TEST_SEEDS, TEST_SIZES, TRAIN_SETTINGS,
+                        VAL_SEEDS)
 
 HEADLINE_CONFIG = (4, 2, 10, 1)   # k, s, l, restarts
 RUN_KEYS = ("quantum_runs", "pasqal_runs")
@@ -284,6 +285,34 @@ def paired_gain(rows, method, baseline, runs_key="quantum_runs", config=HEADLINE
     return out
 
 
+def reward_gain(rows, method, base_method, cost, config, base_config, seeds=TEST_SEEDS, runs_key="quantum_runs",
+                reps=2000, seed=0) -> list[dict]:
+    """The method at `config` against `base_method` at `base_config`, one row per pool as `headline` builds them.
+    Per instance where both finished, the method's `size - cost * runs` minus the baseline's, averaged within each
+    cell and then over cells, with a 95% bootstrap CI that draws instances with replacement within each cell. The
+    verdict is "gain" if the CI lies above 0, "worse" if below 0, else "no gain"."""
+    tables = _tables([r for r in rows if r["seed"] in seeds])
+    cfg, base = (method, *config), (base_method, *base_config)
+    reward = lambda r: r["size"] - cost * r[runs_key]
+    rng = np.random.default_rng(seed)
+    out = []
+    for pool, cells in _pools(seeds):
+        diffs = []
+        for cell in cells:
+            m, b = tables.get(cell, {}).get(cfg, {}), tables.get(cell, {}).get(base, {})
+            used = [i for i in sorted(m) if i in b and not m[i]["exploded"] and not b[i]["exploded"]]
+            if used:
+                diffs.append(np.array([reward(m[i]) - reward(b[i]) for i in used]))
+        if not diffs:
+            continue
+        boot = np.mean([d[rng.integers(0, len(d), (reps, len(d)))].mean(1) for d in diffs], axis=0)
+        lo, hi = np.percentile(boot, [2.5, 97.5]).tolist()
+        out.append(dict(pool=pool, method=method, baseline=base_method, cost=cost, runs_key=runs_key, cells=len(diffs),
+                        instances=sum(len(d) for d in diffs), gain=float(np.mean([d.mean() for d in diffs])),
+                        lo=lo, hi=hi, verdict="gain" if lo > 0 else "worse" if hi < 0 else "no gain"))
+    return out
+
+
 def summarize(rows, reps=2000, seed=0, seeds=TEST_SEEDS) -> list[dict]:
     """One row per cell and config on `seeds`: mean gap with its CI and mean run counts over finished instances,
     the share of counted solves over 30 atoms, and how many instances exploded."""
@@ -336,8 +365,10 @@ COLORS = {"gls": "#2a78d6", "lin": "#eb6834", "lgb": "#1baf7a", "cma": "#eda100"
           "sage": "#6250d6", "gat": "#008300", "gls-screen": "#e87ba4", "gls-paper": "#a3a29a",
           "gls-code": "#6e6d68", "exact": "#0b0b0b", "az": "#882255"}
 COLORS.update({"d" + k: COLORS[k] for k in ("lin", "gin", "sage", "gat")})   # told apart by their dotted line
-COLORS.update(bgin=COLORS["gin"], pg=COLORS["az"], bld=COLORS["az"])         # pg and bld share az's colour
+COLORS.update(bgin=COLORS["gin"], pg=COLORS["az"], bld=COLORS["az"], gfn=COLORS["az"])   # these share az's colour
+COLORS["bandit"] = "#8c5a2b"      # brown: a selector among methods, not a model kind
 MARKERS = {"h2": "o", "h4": "s", "h2h4": "^", "h5": "D", "h2h4h5": "P", "h3h4h5": "X", "mcts": "*"}
+BANDIT_MARKERS = {"bandit-i": "v", "bandit-r": "<"}
 SURFACE, INK, INK_2, GRID, AXIS = "#fcfcfb", "#0b0b0b", "#52514e", "#e1e0d9", "#c3c2b7"
 RUN_LABELS = {"quantum_runs": "quantum runs", "pasqal_runs": "piece-solver runs"}
 GNN_COLORS = {COLORS[k] for k in GNN_KINDS}
@@ -345,15 +376,17 @@ GNN_COLORS = {COLORS[k] for k in GNN_KINDS}
 
 def _style(method: str) -> tuple[str, str, str]:
     """(colour, marker, line style) of a beam method. A composed name takes the colour of the kind that provides
-    its last hook, or of pg or bld when it holds either, and the marker of its joined hook set (a star for tree
+    its last hook, or of pg, bld or gfn when it holds one, and the marker of its joined hook set (a star for tree
     search). Its line is dashed with a tilt, else dash-dot when it mixes kinds, dotted when that kind is a dlin,
-    dgin, dsage or dgat, and solid otherwise."""
+    dgin, dsage or dgat, and solid otherwise. A bandit has its own colour and marker, and a solid line."""
     if method.startswith("gls"):
         return COLORS[method], "o", "-"
+    if method in BANDIT_MARKERS:
+        return COLORS["bandit"], BANDIT_MARKERS[method], "-"
     if method.startswith("cma-"):
         return COLORS["cma"], MARKERS["h2"], "-"
     parts = parse_method(method)
-    kind = next((k for k, _ in parts if k in ("pg", "bld")), None) or max(parts, key=lambda p: p[1])[0]
+    kind = next((k for k, _ in parts if k in ("pg", "bld", "gfn")), None) or max(parts, key=lambda p: p[1])[0]
     marker = MARKERS["mcts" if search_of(method) is not None else "".join(sorted({h for _, h in parts}))]
     style = ("--" if tilt_of(method) is not None else "-." if len({k for k, _ in parts}) > 1
              else ":" if kind[0] == "d" else "-")
@@ -474,8 +507,9 @@ def main(argv=None) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("paths", nargs="+")
     ap.add_argument("--out", required=True, help="directory for the plots")
-    ap.add_argument("--split", choices=["val", "test", "sel"], default="test",
-                    help="seeds to read: validation seeds pooled over the val grid, test seeds, or selection seeds")
+    ap.add_argument("--split", choices=["val", "test", "sel", "fresh"], default="test",
+                    help="seeds to read: validation seeds pooled over the val grid, test seeds, selection seeds, or "
+                         "fresh seeds (pooled as the test seeds are)")
     ap.add_argument("--baselines", default="gls,lin-h2h4",
                     help="comma list: the methods the headline and per-setting tables compare against")
     ap.add_argument("--plot-methods", help="comma list of methods to draw; default all")
@@ -483,7 +517,7 @@ def main(argv=None) -> None:
     ap.add_argument("--config", action="append", default=[], metavar="METHOD=k,s,l",
                     help="widths a method is read at in the tables, 1 restart; repeatable; default 4,2,10")
     a = ap.parse_args(argv)
-    seeds = {"val": VAL_SEEDS, "test": TEST_SEEDS, "sel": SEL_SEEDS}[a.split]
+    seeds = {"val": VAL_SEEDS, "test": TEST_SEEDS, "sel": SEL_SEEDS, "fresh": FRESH_SEEDS}[a.split]
     configs = {m: (*map(int, w.split(",")), 1) for m, _, w in (c.partition("=") for c in a.config)}
     methods = a.methods and a.methods.split(",")
     rows = [r for r in load(a.paths) if r["seed"] in seeds]

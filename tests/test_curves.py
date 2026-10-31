@@ -1,6 +1,7 @@
-import json, pytest
+import json, numpy as np, pytest
 from learned_selection.curves import (COLORS, PAIRED_MARGIN, _print_settings, _stats, _style, _tables, curve_gain,
-                                      envelope, gap_at, headline, main, paired_gain, plot, runs_at, summarize)
+                                      envelope, gap_at, headline, learned_in, main, paired_gain, plot, reward_gain,
+                                      runs_at, summarize)
 from learned_selection.instances import (HELD_OUT_SETTINGS, SEL_SEEDS, TEST_SEEDS, TEST_SIZES, TRAIN_SETTINGS,
                                          VAL_SEEDS)
 
@@ -284,3 +285,53 @@ def test_paired_gain_counts_a_cell_where_no_instance_made_runs():
     assert none == h["no_runs"] == len(TEST_SEEDS)
     assert h["run_ratio"] == pytest.approx(ratio, abs=1e-9) and h["d_gap"] == pytest.approx(d, abs=1e-9)
     assert h["run_ratio_lo"] < h["run_ratio"] < h["run_ratio_hi"] and h["d_gap_lo"] < h["d_gap"] < h["d_gap_hi"]
+
+
+def _reward_rows(sizes_runs, method="bandit-i", cfg=(4, 2, 3), base_cfg=(4, 2, 10)):
+    """The method and a baseline on each seed of one training cell; sizes_runs gives (size, runs) per seed for each,
+    None for an exploded run."""
+    rows = []
+    for i, pair in enumerate(sizes_runs):
+        for name, (k, s, l), got in ((method, cfg, pair[0]), ("bld-h3", base_cfg, pair[1])):
+            rows.append(dict(family=FA, params=PA, n=TEST_SIZES[0], seed=TEST_SEEDS[i], method=name, k=k, s=s, l=l,
+                             restarts=1, exploded=got is None, size=got and got[0], quantum_runs=got and got[1]))
+    return rows
+
+
+def _gain(rows, cost, **kw):
+    return reward_gain(rows, "bandit-i", "bld-h3", cost, (4, 2, 3, 1), (4, 2, 10, 1), **kw)
+
+
+def test_reward_gain_by_hand():
+    # one set element larger and 10 runs dearer at cost 0.01: +1 - 0.1
+    rows = _reward_rows([((30 + i % 3, 50), (29 + i % 3, 40)) for i in range(6)])
+    (g,) = _gain(rows, 0.01, reps=200)
+    assert (g["pool"], g["cells"], g["instances"], g["verdict"]) == ("training", 1, 6, "gain")
+    assert g["gain"] == pytest.approx(0.9) and g["lo"] == g["hi"] == pytest.approx(0.9)
+    assert (g["method"], g["baseline"], g["cost"], g["runs_key"]) == ("bandit-i", "bld-h3", 0.01, "quantum_runs")
+    (g,) = _gain(rows, 0.2, reps=200)     # at cost 0.2 the extra runs cost more than the extra element adds
+    assert g["gain"] == pytest.approx(-1.0) and g["verdict"] == "worse"
+
+
+def test_reward_gain_with_varied_instances_and_an_exploded_one():
+    shifts = (-2, 0, 1, 3, -1, 2, 4, 0)
+    rows = _reward_rows([((30 + d, 50), (29, 40)) for d in shifts] + [(None, (29, 40))])
+    (g,) = _gain(rows, 0.01, reps=500)
+    assert g["instances"] == 8 and g["lo"] < g["gain"] < g["hi"] and g["verdict"] == "gain"
+    assert g["gain"] == pytest.approx(np.mean([1 + d for d in shifts]) - 0.1)
+    (g,) = _gain(_reward_rows([((29 + d, 50), (29, 40)) for d in (-3, 3, -2, 2)]), 0.0, reps=500)
+    assert g["verdict"] == "no gain" and g["lo"] < 0 < g["hi"]
+
+
+def test_reward_gain_reads_only_the_seeds_it_is_given():
+    assert _gain(_reward_rows([((31, 50), (29, 40))] * 3), 0.01, seeds=SEL_SEEDS) == []
+
+
+def test_plot_takes_a_bandit_name(tmp_path):
+    summary = [dict(family=FA, params=PA, n=100, method=m, k=4, s=2, l=l, restarts=1, gap=gap, gap_lo=gap - 1,
+                    gap_hi=gap + 1, quantum_runs=runs, pasqal_runs=runs) for m, l, gap, runs in
+               (("bandit-i", 3, 4.0, 50.0), ("bandit-i", 10, 3.0, 90.0), ("bandit-r", 10, 5.0, 60.0),
+                ("gls", 10, 6.0, 40.0))]
+    (path,) = plot(summary, tmp_path)
+    assert path.exists() and _style("bandit-i") != _style("bandit-r")
+    assert "bandit-i" in learned_in(_reward_rows([((31, 50), (29, 40))] * 3))

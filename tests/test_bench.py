@@ -171,3 +171,29 @@ def test_tilt_adds_beta_times_size_to_the_rank(tmp_path):
     plain = method_hooks("lin-h2h4", tmp_path)["rank"](G, maps)
     tilted = method_hooks("lin-h2h4+tilt-0.5", tmp_path)["rank"](G, maps)
     assert np.allclose(np.asarray(tilted) - np.asarray(plain), [0.5, 1.5], atol=1e-9)
+
+
+def test_new_grids_use_their_own_seeds():
+    from learned_selection.instances import FRESH_SEEDS, SEL_SEEDS
+    assert {i[3] for i in grid("fresh")} == set(FRESH_SEEDS) and len(grid("fresh")) == len(grid("test"))
+    cells = lambda name: {(f, json.dumps(p), n) for f, p, n, _ in grid(name)}
+    assert cells("fresh") == cells("test")
+    assert {i[3] for i in grid("train")} == set(TRAIN_SEEDS) and len(grid("train")) == 480
+    assert not set(FRESH_SEEDS) & (set(TEST_SEEDS) | set(SEL_SEEDS) | set(TRAIN_SEEDS) | set(VAL_SEEDS))
+    assert FRESH_SEEDS == range(1020, 1040)
+
+
+def test_bandit_names_are_known_and_track_structure():
+    assert known_method("bandit-i") and known_method("bandit-r")
+    assert track_of("bandit-i") == "structure" and track_of("bandit-r") == "structure"
+    with pytest.raises(ValueError):
+        parse_method("bandit-i")
+
+
+def test_a_bandit_name_routes_to_its_runner(tmp_path, monkeypatch):
+    from learned_selection import bandit
+    from learned_selection.bench import method_runner
+    monkeypatch.setattr(bandit, "instance_runner", lambda d: ("instance", d))
+    assert method_runner("bandit-i", tmp_path) == ("instance", tmp_path)
+    with pytest.raises(NotImplementedError):
+        method_runner("bandit-r", tmp_path)
