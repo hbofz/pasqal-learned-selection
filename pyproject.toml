@@ -12,6 +12,7 @@ dependencies = [
     "lightgbm>=4.7.0",
     "cma>=4.5.0",
     "torch>=2.15.0",
+    "pandas",
 ]
 
 [dependency-groups]
