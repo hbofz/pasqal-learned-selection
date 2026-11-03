@@ -193,7 +193,63 @@ def test_bandit_names_are_known_and_track_structure():
 def test_a_bandit_name_routes_to_its_runner(tmp_path, monkeypatch):
     from learned_selection import bandit
     from learned_selection.bench import method_runner
-    monkeypatch.setattr(bandit, "instance_runner", lambda d: ("instance", d))
+    monkeypatch.setattr(bandit, "instance_runner", lambda d, solve: ("instance", d))
     assert method_runner("bandit-i", tmp_path) == ("instance", tmp_path)
-    monkeypatch.setattr(bandit, "round_runner", lambda d: ("round", d))
+    monkeypatch.setattr(bandit, "round_runner", lambda d, solve: ("round", d))
     assert method_runner("bandit-r", tmp_path) == ("round", tmp_path)
+
+
+RUNNERS = [("gls", 5), ("lin-h2h4+sage-h5", 5), ("bld-h3+dgin-h4+dgin-h5", 5), ("bld-h3+sage-h4+dsage-h5+mcts-c0.5", 25),
+           ("bandit-r", 10), ("bandit-r", 9002)]
+
+
+def _spy(log, cut=None):
+    from learned_selection.engine import exact_piece_solver
+
+    def solve(piece, mapping, s):
+        log.append((piece, mapping, s))
+        out = exact_piece_solver(piece, mapping, s)
+        return out if cut is None else out[:cut]
+    return solve
+
+
+@pytest.mark.parametrize("name,l", RUNNERS)
+def test_every_runner_sends_pieces_to_solve(name, l):
+    from learned_selection.bench import method_runner
+    from learned_selection.instances import make
+    G, log = make("er", 40, 0, p=0.25), []
+    want = method_runner(name, "models")(G, 2, 2, l, 0)
+    got = method_runner(name, "models", solve=_spy(log))(G, 2, 2, l, 0)
+    assert len(log) == got.pasqal_runs > 0
+    assert all(len(p) > 5 and set(m) == set(p) and len(set(m.values())) == len(m) for p, m, _ in log)
+    assert [getattr(got, f) for f in ("size", "quantum_runs", "pasqal_runs", "atoms")] == \
+           [getattr(want, f) for f in ("size", "quantum_runs", "pasqal_runs", "atoms")]
+
+
+def test_round_bandit_passes_the_arms_s():
+    from learned_selection.bench import method_runner
+    from learned_selection.instances import make
+    G = make("er", 40, 0, p=0.25)
+    for l, s in ((9001, 1), (9004, 3)):
+        log = []
+        method_runner("bandit-r", "models", solve=_spy(log))(G, 2, 2, l, 0)
+        assert log and {x[2] for x in log} == {s}
+
+
+@pytest.mark.parametrize("name,l", RUNNERS)
+def test_runners_take_short_answers(name, l):
+    from learned_selection.bench import method_runner
+    from learned_selection.instances import make
+    from learned_selection.solvers import is_independent
+    G = make("er", 40, 0, p=0.25)
+    res = method_runner(name, "models", solve=_spy([], cut=1))(G, 2, 2, l, 0)
+    assert is_independent(G, res.solution) and res.size > 0
+
+
+def test_run_instance_labels_the_solver():
+    args = ("er", {"p": 0.25}, 25, 0, ["gls"])
+    kw = dict(widths=[(2, 2, 5)], restarts=[1], time_limit_s=5)
+    assert {r["piece_solver"] for r in run_instance(*args, **kw)} == {"exact-top-s"}
+    log = []
+    rows = run_instance(*args, **kw, solve=_spy(log), piece_solver="emu")
+    assert log and {r["piece_solver"] for r in rows} == {"emu"}

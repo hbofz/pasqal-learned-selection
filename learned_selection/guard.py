@@ -104,6 +104,8 @@ def labels_guard(paths, instances, workers) -> tuple[int, int]:
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--records", nargs="+", default=[], metavar="GLOB")
+    ap.add_argument("--grid", choices=["test", "fresh"], default="test")
+    ap.add_argument("--seeds", help="inclusive range a-b: keep only the instances of these seeds, before stride and count")
     ap.add_argument("--methods", default="")
     ap.add_argument("--stride", type=int, default=52)
     ap.add_argument("--count", type=int, default=10)
@@ -115,7 +117,11 @@ def main(argv=None) -> None:
     same = differ = missing = 0
     empty = False                                  # a part that was asked for and compared nothing
     if a.records:
-        insts = grid("test")[::a.stride][:a.count] + grid("val")[:2]
+        insts = grid(a.grid)
+        if a.seeds:
+            lo, hi = map(int, a.seeds.split("-"))
+            insts = [i for i in insts if lo <= i[3] <= hi]
+        insts = insts[::a.stride][:a.count] + (grid("val")[:2] if a.grid == "test" else [])
         paths = sorted(p for g in a.records for p in glob(g))
         same, differ, missing = records_guard(paths, a.methods.split(","), insts, a.workers, a.models)
         empty = same == 0

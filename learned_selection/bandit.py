@@ -106,12 +106,12 @@ def load_model(path) -> dict:
     return {int(l): {k: np.array(v) for k, v in m.items()} for l, m in d["models"].items()}
 
 
-def instance_runner(models_dir):
+def instance_runner(models_dir, solve=exact_piece_solver):
     """run(graph, k, s, l, seed) for bandit-i. The ridge models and every menu arm's runner are loaded here, so a
     missing file fails now. k and s are ignored, and c = l / 1000 picks the ridge."""
     d = Path(models_dir or "models")
     models = load_model(d / "bandit-i.json")
-    runners = {m: method_runner(m, models_dir) for m in dict.fromkeys(m for m, *_ in MENU)}
+    runners = {m: method_runner(m, models_dir, solve=solve) for m in dict.fromkeys(m for m, *_ in MENU)}
 
     def run(G, k, s, l, seed):
         if l not in models:
@@ -134,12 +134,13 @@ def round_context(level, n0, runs, rnd) -> np.ndarray:
                      partial, size * density])
 
 
-def run_round_beam(G, choose, hooks, seed=0, small=5) -> tuple:
+def run_round_beam(G, choose, hooks, seed=0, small=5, solve=exact_piece_solver) -> tuple:
     """One beam whose arm of ROUND_ARMS comes from choose(context) at the start of each round, never on an empty
     level. Returns (RunResult, [(context, arm)] per round). `hooks` holds whichever of score, build, rank and value
     the stack has; the first three go to the generator, and value ranks the level by partial size plus its value.
     The running count of solves in the context is the solves made so far, with the small branches kept for the next
-    round counted already, so the last context's count is the run's quantum_runs."""
+    round counted already, so the last context's count is the run's quantum_runs. `solve(piece, mapping, s)` takes the
+    s of the round's arm."""
     gen = gls_generator(seed=seed, **{h: hooks[h] for h in ("score", "build", "rank") if h in hooks})
     value, n0 = hooks.get("value"), len(G)
     state = dict(arm=0, runs=int(0 < n0 <= small), rnd=0, seen=[])
@@ -154,8 +155,8 @@ def run_round_beam(G, choose, hooks, seed=0, small=5) -> tuple:
         state["runs"] += len(maps)
         return maps
 
-    def solve(piece, m, _):
-        return exact_piece_solver(piece, m, ROUND_ARMS[state["arm"]][1])
+    def solve_arm(piece, m, _):
+        return solve(piece, m, ROUND_ARMS[state["arm"]][1])
 
     def prune(level, _):
         state["rnd"] += 1
@@ -170,7 +171,7 @@ def run_round_beam(G, choose, hooks, seed=0, small=5) -> tuple:
             start(level)
         return level
     start([(G, [])])
-    return run_beam(G, generate, solve, 4, 2, prune, small), state["seen"]
+    return run_beam(G, generate, solve_arm, 4, 2, prune, small), state["seen"]
 
 
 @functools.lru_cache(maxsize=None)
@@ -202,7 +203,7 @@ def update_round(A, b, episodes) -> None:
             b[arm] += (e["reward"] - e["v0"]) * x
 
 
-def round_runner(models_dir):
+def round_runner(models_dir, solve=exact_piece_solver):
     """run(graph, k, s, l, seed) for bandit-r. The stack's hooks are loaded here, so a missing file fails now. The arm
     each round is greedy on `{models_dir}/bandit-r/theta_{l}.json`, read when first needed (c = l / 1000). A larger l
     holds arm l - FIXED_ARM_L - 1 in every round and reads no theta. k and s are ignored."""
@@ -217,7 +218,7 @@ def round_runner(models_dir):
             if l not in thetas:
                 thetas[l] = np.array(json.loads((d / "bandit-r" / f"theta_{l}.json").read_text())["theta"])
             choose = lambda x: int((thetas[l] @ x).argmax())
-        return run_round_beam(G, choose, hooks, seed)[0]
+        return run_round_beam(G, choose, hooks, seed, solve=solve)[0]
     return run
 
 
