@@ -1,0 +1,12 @@
+{
+ "source": "fja05680/sp500",
+ "file": "S&P 500 Historical Components & Changes (Updated).csv",
+ "commit": "a2430f2af0c79ddf0748e91de11bdeb1616ab5a7",
+ "membership_sha256": "36326709d46d6cd25834de5df457b16f5f96fad3a06b9beac28f7b88aa0b0d54",
+ "close_sha256": "f54dae9535a2fa91c3a26e5195dbafb96ab6749dbb7113824de568bcb775a47f",
+ "requested": 995,
+ "priced": 686,
+ "first": "2004-01-02",
+ "last": "2026-10-30",
+ "fetched": "2026-11-02"
+}
